@@ -1348,6 +1348,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "james-sources"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "james-core",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "tracing",
+ "url",
+]
+
+[[package]]
 name = "james-teamspeak"
 version = "0.1.0"
 dependencies = [
