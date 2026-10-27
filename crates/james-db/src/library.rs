@@ -135,6 +135,25 @@ impl Db {
         .collect())
     }
 
+    /// Number of tracks matching a search (see [`Db::search_library`]).
+    pub async fn count_library(&self, query: &str) -> Result<i64> {
+        let pattern = format!(
+            "%{}%",
+            query
+                .trim()
+                .replace('\\', "\\\\")
+                .replace('%', "\\%")
+                .replace('_', "\\_")
+        );
+        Ok(sqlx::query_scalar(
+            "SELECT COUNT(*) FROM library_tracks WHERE title LIKE ?1 ESCAPE '\\' OR artist LIKE ?1 ESCAPE '\\'
+                OR album LIKE ?1 ESCAPE '\\' OR path LIKE ?1 ESCAPE '\\'",
+        )
+        .bind(pattern)
+        .fetch_one(self.pool())
+        .await?)
+    }
+
     pub async fn library_count(&self) -> Result<i64> {
         Ok(sqlx::query_scalar("SELECT COUNT(*) FROM library_tracks")
             .fetch_one(self.pool())
@@ -204,6 +223,7 @@ mod tests {
             1,
             "LIKE wildcards are escaped"
         );
+        assert_eq!(db.count_library("alpha").await.unwrap(), 1);
         assert_eq!(
             db.search_library("", 10, 0).await.unwrap()[0].artist.as_deref(),
             Some("Ann")

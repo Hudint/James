@@ -10,6 +10,7 @@ use std::path::{Path, PathBuf};
 use figment::providers::{Env, Format, Serialized, Toml};
 use figment::Figment;
 use james_runtime::InstanceConfig;
+use james_sources::net::NetworkPolicy;
 use james_sources::ytdlp::YtDlpConfig;
 use serde::{Deserialize, Serialize};
 
@@ -23,6 +24,7 @@ pub struct Config {
     pub tools: ToolsConfig,
     pub media: MediaConfig,
     pub ytdlp: YtDlpConfig,
+    pub network: NetworkPolicy,
     /// Instances defined in the config file (more can be created via the API).
     pub instances: Vec<InstanceConfig>,
 }
@@ -32,6 +34,10 @@ pub struct Config {
 pub struct ToolsConfig {
     pub ffmpeg: String,
     pub ffprobe: String,
+    /// Maximum number of yt-dlp/ffprobe processes running at once.
+    pub max_concurrent: usize,
+    /// Threads of the dedicated audio runtime.
+    pub audio_threads: usize,
 }
 
 impl Default for ToolsConfig {
@@ -39,6 +45,8 @@ impl Default for ToolsConfig {
         Self {
             ffmpeg: "ffmpeg".into(),
             ffprobe: "ffprobe".into(),
+            max_concurrent: 8,
+            audio_threads: 2,
         }
     }
 }
@@ -54,6 +62,17 @@ pub struct MediaConfig {
 #[serde(default, deny_unknown_fields)]
 pub struct HttpConfig {
     pub bind: SocketAddr,
+    /// Directory with the built web UI; `None` serves the API only.
+    pub web_root: Option<PathBuf>,
+    /// Mark session cookies `Secure` (enable when served via HTTPS).
+    pub secure_cookies: bool,
+    /// Addresses of reverse proxies whose `X-Forwarded-For` header is trusted. The proxy must
+    /// pass the original `Host` header (nginx: `proxy_set_header Host $host;`), otherwise
+    /// browsers without `Sec-Fetch-Site` fail the same-origin check.
+    pub trusted_proxies: Vec<std::net::IpAddr>,
+    /// Host names the web interface is reachable under, e.g. `["bot.example.com"]`. Requests
+    /// for other names are refused (protects against DNS rebinding). Empty = no check.
+    pub allowed_hosts: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -80,6 +99,7 @@ impl Default for Config {
             tools: ToolsConfig::default(),
             media: MediaConfig::default(),
             ytdlp: YtDlpConfig::default(),
+            network: NetworkPolicy::default(),
             instances: Vec::new(),
         }
     }
@@ -89,6 +109,10 @@ impl Default for HttpConfig {
     fn default() -> Self {
         Self {
             bind: ([127, 0, 0, 1], 8087).into(),
+            web_root: None,
+            secure_cookies: false,
+            trusted_proxies: Vec::new(),
+            allowed_hosts: Vec::new(),
         }
     }
 }

@@ -5,7 +5,9 @@
 //! plugins register their own through the plugin host.
 
 use std::collections::HashMap;
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
+
+use parking_lot::RwLock;
 
 use async_trait::async_trait;
 use james_core::platform::{Client, MessageTarget};
@@ -43,7 +45,7 @@ pub trait Command: Send + Sync {
 /// Decides whether a client may run a command requiring a permission.
 #[async_trait]
 pub trait PermissionChecker: Send + Sync {
-    async fn allowed(&self, instance: &str, client: &Client, permission: &str) -> bool;
+    async fn allowed(&self, instance: &InstanceHandle, client: &Client, permission: &str) -> bool;
 }
 
 /// Allows everything (used until accounts and roles are configured).
@@ -51,7 +53,7 @@ pub struct AllowAll;
 
 #[async_trait]
 impl PermissionChecker for AllowAll {
-    async fn allowed(&self, _: &str, _: &Client, _: &str) -> bool {
+    async fn allowed(&self, _: &InstanceHandle, _: &Client, _: &str) -> bool {
         true
     }
 }
@@ -79,7 +81,7 @@ impl Default for CommandRegistry {
 
 impl CommandRegistry {
     pub fn register(&self, command: Arc<dyn Command>) {
-        let mut inner = self.inner.write().unwrap();
+        let mut inner = self.inner.write();
         let name = command.name().to_ascii_lowercase();
         for alias in command.aliases() {
             inner.aliases.insert(alias.to_ascii_lowercase(), name.clone());
@@ -88,18 +90,18 @@ impl CommandRegistry {
     }
 
     pub fn unregister(&self, name: &str) {
-        let mut inner = self.inner.write().unwrap();
+        let mut inner = self.inner.write();
         let name = name.to_ascii_lowercase();
         inner.commands.remove(&name);
         inner.aliases.retain(|_, target| *target != name);
     }
 
     pub fn set_permission_checker(&self, checker: Arc<dyn PermissionChecker>) {
-        *self.permissions.write().unwrap() = checker;
+        *self.permissions.write() = checker;
     }
 
     pub fn get(&self, name: &str) -> Option<Arc<dyn Command>> {
-        let inner = self.inner.read().unwrap();
+        let inner = self.inner.read();
         let name = name.to_ascii_lowercase();
         let name = inner.aliases.get(&name).unwrap_or(&name);
         inner.commands.get(name).cloned()
@@ -107,7 +109,7 @@ impl CommandRegistry {
 
     /// All commands sorted by name.
     pub fn list(&self) -> Vec<Arc<dyn Command>> {
-        let inner = self.inner.read().unwrap();
+        let inner = self.inner.read();
         let mut list: Vec<_> = inner.commands.values().cloned().collect();
         list.sort_by(|a, b| a.name().cmp(b.name()));
         list
@@ -129,11 +131,14 @@ impl CommandRegistry {
             return None;
         }
         let Some(command) = self.get(name) else {
-            return Some(format!("Unknown command '{name}'. Try {prefix}help."));
+            return Some(format!(
+                "Unknown command '{}'. Try {prefix}help.",
+                james_core::text::escape_markup(name)
+            ));
         };
         if let Some(permission) = command.permission() {
-            let checker = self.permissions.read().unwrap().clone();
-            if !checker.allowed(instance.id(), &invoker, permission).await {
+            let checker = self.permissions.read().clone();
+            if !checker.allowed(&instance, &invoker, permission).await {
                 return Some("You are not allowed to use this command.".into());
             }
         }
@@ -145,7 +150,14 @@ impl CommandRegistry {
         };
         match command.run(&ctx).await {
             Ok(reply) => reply,
-            Err(e) => Some(format!("Error: {e:#}")),
+            Err(e) => {
+                let detail = format!("{e:#}");
+                tracing::debug!(command = %name, error = %detail, "command failed");
+                Some(format!(
+                    "Error: {}",
+                    james_core::text::escape_markup(&james_core::text::user_message(&detail))
+                ))
+            }
         }
     }
 }

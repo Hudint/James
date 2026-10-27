@@ -96,6 +96,19 @@ impl Db {
         Ok((!user.disabled).then_some(user))
     }
 
+    /// Revokes all tokens of a user except `keep` (e.g. the caller's own session).
+    pub async fn revoke_user_tokens(&self, user_id: i64, keep: Option<&str>) -> Result<u64> {
+        let keep = keep.map(hash).unwrap_or_default();
+        Ok(
+            sqlx::query("DELETE FROM tokens WHERE user_id = ? AND token_hash != ?")
+                .bind(user_id)
+                .bind(keep)
+                .execute(self.pool())
+                .await?
+                .rows_affected(),
+        )
+    }
+
     pub async fn revoke_token(&self, token: &str) -> Result<()> {
         sqlx::query("DELETE FROM tokens WHERE token_hash = ?")
             .bind(hash(token))

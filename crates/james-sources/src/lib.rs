@@ -3,19 +3,37 @@
 //! Default priority order (lower is asked first): [`local`] (0), [`stream`] (10),
 //! [`ytdlp`] (100, catch-all for other URLs and free-text search).
 
+pub mod egress;
 pub mod local;
+pub mod net;
 pub mod probe;
 pub mod stream;
 pub mod ytdlp;
 
 use std::process::Stdio;
+use std::sync::OnceLock;
 use std::time::Duration;
 
 use anyhow::{bail, Context};
 use tokio::process::Command;
+use tokio::sync::Semaphore;
+
+static TOOL_SLOTS: OnceLock<Semaphore> = OnceLock::new();
+const DEFAULT_TOOL_SLOTS: usize = 8;
+
+/// Limits how many external tools (yt-dlp, ffprobe) run at once across all instances.
+/// Must be called before the first tool runs; later calls are ignored.
+pub fn set_max_concurrent_tools(slots: usize) {
+    let _ = TOOL_SLOTS.set(Semaphore::new(slots.max(1)));
+}
+
+fn tool_slots() -> &'static Semaphore {
+    TOOL_SLOTS.get_or_init(|| Semaphore::new(DEFAULT_TOOL_SLOTS))
+}
 
 /// Runs a command and returns stdout, failing with stderr on a non-zero exit.
 pub(crate) async fn run(mut cmd: Command, timeout: Duration) -> anyhow::Result<Vec<u8>> {
+    let _slot = tool_slots().acquire().await.context("tool limiter closed")?;
     cmd.stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())

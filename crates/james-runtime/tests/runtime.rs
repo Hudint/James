@@ -1,86 +1,18 @@
-//! Instance runtime tests with a fake platform adapter.
+//! End-to-end instance test: chat command → local source → real audio engine → fake platform.
 
-use std::sync::{Arc, Mutex};
+mod common;
+
+use std::sync::Arc;
 use std::time::Duration;
 
-use async_trait::async_trait;
-use james_core::platform::{
-    Capabilities, Client, MessageTarget, PlatformAdapter, PlatformCommand, PlatformContext, PlatformEvent,
-    Snapshot,
-};
+use common::{user, FakePlatform, PlatformState};
+use james_core::platform::{MessageTarget, PlatformEvent};
 use james_core::source::SourceRegistry;
-use james_runtime::{InstanceConfig, InstanceEvent, InstanceManager, MemoryStore, PlatformFactory, Services};
+use james_runtime::{
+    AudioEngineFactory, InstanceConfig, InstanceEvent, InstanceManager, MemoryStore, Services,
+};
 use james_sources::local::LocalResolver;
 use tokio::sync::mpsc;
-
-#[derive(Default)]
-struct Shared {
-    sent: Mutex<Vec<String>>,
-    audio_frames: Mutex<usize>,
-    inject: Mutex<Option<mpsc::UnboundedReceiver<PlatformEvent>>>,
-}
-
-struct FakeFactory(Arc<Shared>);
-
-impl PlatformFactory for FakeFactory {
-    fn id(&self) -> &str {
-        "fake"
-    }
-    fn create(
-        &self,
-        _: &serde_json::Value,
-        _: Option<serde_json::Value>,
-    ) -> anyhow::Result<Box<dyn PlatformAdapter>> {
-        Ok(Box::new(FakeAdapter(self.0.clone())))
-    }
-}
-
-struct FakeAdapter(Arc<Shared>);
-
-#[async_trait]
-impl PlatformAdapter for FakeAdapter {
-    fn capabilities(&self) -> Capabilities {
-        Capabilities {
-            max_bitrate: 128_000,
-            ..Default::default()
-        }
-    }
-
-    async fn run(&mut self, ctx: &mut PlatformContext) -> anyhow::Result<()> {
-        let mut inject = self.0.inject.lock().unwrap().take().expect("single connection");
-        ctx.events.send(PlatformEvent::Connected {
-            snapshot: Snapshot::default(),
-        })?;
-        loop {
-            tokio::select! {
-                Some(e) = inject.recv() => ctx.events.send(e)?,
-                c = ctx.commands.recv() => match c {
-                    Some(PlatformCommand::SendMessage { text, reply, .. }) => {
-                        self.0.sent.lock().unwrap().push(text);
-                        let _ = reply.send(Ok(()));
-                    }
-                    Some(PlatformCommand::SetDescription { reply, .. }) => { let _ = reply.send(Ok(())); }
-                    Some(PlatformCommand::Disconnect { .. }) | None => return Ok(()),
-                    Some(_) => {}
-                },
-                Some(frame) = ctx.audio.recv() => if !frame.data.is_empty() {
-                    *self.0.audio_frames.lock().unwrap() += 1;
-                },
-            }
-        }
-    }
-}
-
-fn user() -> Client {
-    Client {
-        id: "5".into(),
-        uid: "uid-5".into(),
-        name: "Alice".into(),
-        channel: None,
-        server_groups: vec![],
-        is_self: false,
-    }
-}
 
 #[tokio::test]
 async fn chat_command_plays_local_file() {
@@ -101,19 +33,21 @@ async fn chat_command_plays_local_file() {
         .unwrap();
     assert!(status.success());
 
-    let shared = Arc::new(Shared::default());
-    let (inject_tx, inject_rx) = mpsc::unbounded_channel();
-    *shared.inject.lock().unwrap() = Some(inject_rx);
+    let platform = Arc::new(PlatformState::default());
+    let (inject, inject_rx) = mpsc::unbounded_channel();
+    *platform.inject.lock() = Some(inject_rx);
 
     let mut sources = SourceRegistry::default();
     sources.register(
         0,
         Arc::new(LocalResolver::new(vec![dir.path().into()], "ffprobe")),
     );
+    let store = Arc::new(MemoryStore::default());
     let services = Services::new(
         sources,
-        vec![Arc::new(FakeFactory(shared.clone()))],
-        Arc::new(MemoryStore::default()),
+        vec![Arc::new(FakePlatform(platform.clone()))],
+        Arc::new(AudioEngineFactory::new(tokio::runtime::Handle::current())),
+        store.clone(),
         "ffmpeg",
     );
     james_runtime::builtin::register(&services.commands);
@@ -126,29 +60,29 @@ async fn chat_command_plays_local_file() {
             ..Default::default()
         })
         .unwrap();
-    manager.start("test").unwrap();
+    manager.start("test").await.unwrap();
 
-    // Wait for the connection, then send a chat command.
     loop {
         if let InstanceEvent::Connected { .. } = events.recv().await.unwrap().event {
             break;
         }
     }
-    inject_tx
+    let alice = user("Alice");
+    inject
         .send(PlatformEvent::Message {
             mode: MessageTarget::Channel,
-            from: user(),
+            from: alice.clone(),
             text: "!play local:beep.flac".into(),
         })
         .unwrap();
 
     let mut started = false;
-    let ended = tokio::time::timeout(Duration::from_secs(10), async {
+    let (item, error) = tokio::time::timeout(Duration::from_secs(10), async {
         loop {
             match events.recv().await.unwrap().event {
                 InstanceEvent::TrackStarted { item } => {
                     assert_eq!(item.track.title, "Beep");
-                    assert_eq!(item.requested_by.unwrap().name, "Alice");
+                    assert_eq!(item.requested_by.as_ref().unwrap().name, "Alice");
                     started = true;
                 }
                 InstanceEvent::TrackEnded { item, error } => break (item, error),
@@ -159,37 +93,70 @@ async fn chat_command_plays_local_file() {
     .await
     .expect("track did not finish");
     assert!(started);
-    assert_eq!(ended.1, None);
-    assert_eq!(ended.0.track.title, "Beep");
+    assert_eq!(error, None);
+    assert_eq!(item.track.title, "Beep");
     assert_eq!(
-        shared.sent.lock().unwrap().first().map(String::as_str),
+        platform.sent.lock().first().map(String::as_str),
         Some("Playing: Beep (0:01)")
     );
-    assert!(*shared.audio_frames.lock().unwrap() >= 49);
-
-    // Unknown command and status queries.
-    inject_tx
-        .send(PlatformEvent::Message {
-            mode: MessageTarget::Client,
-            from: user(),
-            text: "!nope".into(),
-        })
-        .unwrap();
-    inject_tx
-        .send(PlatformEvent::Message {
-            mode: MessageTarget::Client,
-            from: user(),
-            text: "!vol 80".into(),
-        })
-        .unwrap();
-    tokio::time::sleep(Duration::from_millis(300)).await;
-    let sent = shared.sent.lock().unwrap().clone();
+    assert!(*platform.audio_frames.lock() >= 49);
     assert!(
-        sent.iter().any(|m| m.starts_with("Unknown command 'nope'")),
+        platform.descriptions.lock().iter().any(|d| d.contains("Beep")),
+        "now playing description"
+    );
+    let registry = manager.services().sources.read().clone();
+    let key = registry
+        .cache_key(&item.track)
+        .await
+        .expect("local files are cacheable");
+    assert!(
+        key.starts_with(&item.track.locator),
+        "key includes the file identity: {key}"
+    );
+    common::eventually("loudness saved", || async {
+        james_runtime::InstanceStore::loudness(&*store, "local", &key)
+            .await
+            .is_some()
+    })
+    .await;
+    assert!(
+        james_runtime::InstanceStore::loudness(&*store, "local", &key)
+            .await
+            .is_some(),
+        "loudness of a complete play is cached"
+    );
+
+    // Commands of one client run in order.
+    for text in ["!nope", "!vol 80", "!vol"] {
+        inject
+            .send(PlatformEvent::Message {
+                mode: MessageTarget::Client,
+                from: alice.clone(),
+                text: text.into(),
+            })
+            .unwrap();
+    }
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let sent = platform.sent.lock().clone();
+    assert_eq!(
+        &sent[1..],
+        ["Unknown command 'nope'. Try !help.", "Volume: 80", "Volume: 80"],
         "{sent:?}"
     );
-    assert!(sent.iter().any(|m| m == "Volume: 80"), "{sent:?}");
-    assert_eq!(manager.get("test").unwrap().status().await.unwrap().volume, 80);
 
-    manager.stop_all();
+    // Rate limit: a flood of commands is cut off.
+    for _ in 0..30 {
+        inject
+            .send(PlatformEvent::Message {
+                mode: MessageTarget::Client,
+                from: alice.clone(),
+                text: "!vol".into(),
+            })
+            .unwrap();
+    }
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    let replies = platform.sent.lock().len() - sent.len();
+    assert!(replies <= 8, "rate limited, got {replies} replies");
+
+    manager.stop_all().await;
 }

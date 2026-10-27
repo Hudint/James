@@ -14,6 +14,7 @@ use crate::audio::OpusFrame;
 pub type PlatformId = String;
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct Capabilities {
     /// Number of independent voice sessions (TeamSpeak: 1, Discord: one per guild).
     pub multi_session: bool,
@@ -27,6 +28,7 @@ pub struct Capabilities {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
 pub struct Client {
     pub id: PlatformId,
     /// Stable identity across sessions (TeamSpeak UID, Discord user id).
@@ -38,6 +40,7 @@ pub struct Client {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
 pub struct Channel {
     pub id: PlatformId,
     pub parent: Option<PlatformId>,
@@ -49,12 +52,14 @@ pub struct Channel {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
 pub struct ServerGroup {
     pub id: PlatformId,
     pub name: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
 pub struct ServerInfo {
     pub name: String,
     pub version: String,
@@ -64,6 +69,7 @@ pub struct ServerInfo {
 
 /// Full view of the server as seen by the bot.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct Snapshot {
     pub server: Option<ServerInfo>,
     pub own_client: Option<PlatformId>,
@@ -188,6 +194,13 @@ pub enum PlatformCommand {
     Snapshot {
         reply: Reply<Snapshot>,
     },
+    /// Platform-specific operation (e.g. TeamSpeak channel management), so plugins can
+    /// use features without a dedicated variant. Unknown names fail with an error.
+    Extension {
+        name: String,
+        args: serde_json::Value,
+        reply: Reply<serde_json::Value>,
+    },
     Disconnect {
         reason: String,
     },
@@ -221,4 +234,10 @@ pub trait PlatformFactory: Send + Sync {
         settings: &serde_json::Value,
         credentials: Option<serde_json::Value>,
     ) -> anyhow::Result<Box<dyn PlatformAdapter>>;
+
+    /// Validates settings without side effects (no connection, no key generation).
+    fn validate(&self, settings: &serde_json::Value) -> anyhow::Result<()>;
+
+    /// Capabilities of adapters created by this factory.
+    fn capabilities(&self) -> Capabilities;
 }

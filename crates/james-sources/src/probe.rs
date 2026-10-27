@@ -45,8 +45,9 @@ pub async fn probe(ffprobe: &str, path: &Path) -> anyhow::Result<Metadata> {
         "json",
         "-show_format",
         "-show_streams",
-    ])
-    .arg(path);
+    ]);
+    cmd.args(james_core::media::local_input_args(path));
+    james_core::process::apply_proxy_env(&mut cmd, None);
     let out = crate::run(cmd, Duration::from_secs(30)).await?;
     let parsed: Output = serde_json::from_slice(&out)?;
     let mut tags = std::collections::HashMap::new();
@@ -81,4 +82,28 @@ pub async fn probe(ffprobe: &str, path: &Path) -> anyhow::Result<Metadata> {
             .iter()
             .any(|s| s.codec_type.as_deref() == Some("audio")),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A DASH manifest disguised as MP3 must not make ffprobe fetch its URLs (SSRF).
+    #[tokio::test]
+    async fn playlist_formats_in_disguise_fetch_nothing() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("evil.mp3");
+        std::fs::write(
+            &path,
+            format!(
+                r#"<?xml version="1.0"?><MPD xmlns="urn:mpeg:dash:schema:mpd:2011" type="static" mediaPresentationDuration="PT10S" minBufferTime="PT1S" profiles="urn:mpeg:dash:profile:isoff-on-demand:2011"><Period><AdaptationSet mimeType="audio/mp4"><Representation id="a" bandwidth="1000"><BaseURL>http://{address}/leak</BaseURL></Representation></AdaptationSet></Period></MPD>"#
+            ),
+        )
+        .unwrap();
+        assert!(probe("ffprobe", &path).await.is_err());
+        let connected = tokio::time::timeout(Duration::from_millis(300), listener.accept()).await;
+        assert!(connected.is_err(), "ffprobe must not connect anywhere");
+    }
 }

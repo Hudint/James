@@ -6,34 +6,50 @@
 use std::collections::BTreeMap;
 use std::time::Duration;
 
-use anyhow::{anyhow, Context};
+use anyhow::{anyhow, bail, Context};
 use async_trait::async_trait;
+use futures::StreamExt;
+use james_core::media::AUDIO_EXTENSIONS;
 use james_core::source::{is_http_url, strip_scheme, MediaInput, SourceResolver, Track};
 
-const AUDIO_EXTENSIONS: &[&str] = &["mp3", "aac", "m4a", "ogg", "oga", "opus", "flac", "wav"];
+use crate::net::NetworkPolicy;
+
 const PLAYLIST_EXTENSIONS: &[&str] = &["m3u", "pls"];
 const HLS_EXTENSIONS: &[&str] = &["m3u8"];
+/// Playlist files larger than this are rejected (they are a few hundred bytes in practice).
+const MAX_PLAYLIST_BYTES: usize = 64 * 1024;
+const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
 
 pub struct StreamResolver {
     http: reqwest::Client,
-}
-
-impl Default for StreamResolver {
-    fn default() -> Self {
-        Self::new()
-    }
+    network: NetworkPolicy,
 }
 
 impl StreamResolver {
     pub const ID: &'static str = "stream";
 
-    pub fn new() -> Self {
-        let http = reqwest::Client::builder()
+    /// All requests go through `egress_proxy` when given (see [`crate::egress`]).
+    pub fn new(network: NetworkPolicy, egress_proxy: Option<&str>) -> Self {
+        let redirect_policy = network.clone();
+        let mut builder = reqwest::Client::builder();
+        // Fail closed: without the proxy only the first hop would be checked.
+        builder = builder.no_proxy();
+        if let Some(proxy) = egress_proxy {
+            builder = builder.proxy(reqwest::Proxy::all(proxy).expect("valid egress proxy URL"));
+        }
+        let http = builder
             .user_agent(concat!("James/", env!("CARGO_PKG_VERSION")))
-            .connect_timeout(Duration::from_secs(10))
+            .connect_timeout(REQUEST_TIMEOUT)
+            .redirect(reqwest::redirect::Policy::custom(move |attempt| {
+                if attempt.previous().len() >= 5 || !redirect_policy.allows_redirect(attempt.url()) {
+                    attempt.stop()
+                } else {
+                    attempt.follow()
+                }
+            }))
             .build()
             .expect("valid http client");
-        Self { http }
+        Self { http, network }
     }
 
     fn url_of(input: &str) -> Option<&str> {
@@ -52,7 +68,7 @@ impl StreamResolver {
     /// Reads the station name from Icecast/Shoutcast headers without downloading the stream.
     async fn station_name(&self, url: &str) -> Option<String> {
         let response = tokio::time::timeout(
-            Duration::from_secs(10),
+            REQUEST_TIMEOUT,
             self.http.get(url).header("Icy-MetaData", "1").send(),
         )
         .await
@@ -66,6 +82,45 @@ impl StreamResolver {
             .trim()
             .to_owned();
         (!name.is_empty()).then_some(name)
+    }
+
+    /// Downloads a playlist file with a size cap and timeout.
+    async fn fetch_playlist(&self, url: &str) -> anyhow::Result<String> {
+        let response = tokio::time::timeout(REQUEST_TIMEOUT, self.http.get(url).send())
+            .await
+            .context("playlist request timed out")?
+            .context("playlist request failed")?
+            .error_for_status()
+            .map_err(|e| {
+                anyhow!(
+                    "playlist request failed with status {}",
+                    e.status().unwrap_or_default()
+                )
+            })?;
+        if let Some(content_type) = response.headers().get(reqwest::header::CONTENT_TYPE) {
+            let content_type = content_type.to_str().unwrap_or("").to_ascii_lowercase();
+            if content_type.starts_with("audio/")
+                && !content_type.contains("mpegurl")
+                && !content_type.contains("scpls")
+            {
+                bail!("the URL is an audio stream, not a playlist");
+            }
+        }
+        let mut body = Vec::new();
+        let mut chunks = response.bytes_stream();
+        let read = async {
+            while let Some(chunk) = chunks.next().await {
+                body.extend_from_slice(&chunk?);
+                if body.len() > MAX_PLAYLIST_BYTES {
+                    bail!("playlist file is too large");
+                }
+            }
+            Ok(())
+        };
+        tokio::time::timeout(REQUEST_TIMEOUT, read)
+            .await
+            .context("playlist download timed out")??;
+        Ok(String::from_utf8_lossy(&body).into_owned())
     }
 }
 
@@ -101,22 +156,15 @@ impl SourceResolver for StreamResolver {
     }
 
     async fn resolve(&self, input: &str) -> anyhow::Result<Vec<Track>> {
-        let mut url = Self::url_of(input)
-            .ok_or_else(|| anyhow!("not a stream URL"))?
-            .to_owned();
+        let raw = Self::url_of(input).ok_or_else(|| anyhow!("not a stream URL"))?;
+        let mut url = self.network.check(raw).await?;
         if extension(&url).is_some_and(|e| PLAYLIST_EXTENSIONS.contains(&e.as_str())) {
-            let body = self
-                .http
-                .get(&url)
-                .send()
-                .await?
-                .error_for_status()?
-                .text()
-                .await?;
+            let body = self.fetch_playlist(&url).await?;
             url = parse_playlist(&body)
                 .into_iter()
                 .next()
                 .context("playlist contains no stream URL")?;
+            url = self.network.check(&url).await?;
         }
         let is_file = extension(&url).is_some_and(|e| AUDIO_EXTENSIONS.contains(&e.as_str()));
         let name = self.station_name(&url).await;
@@ -140,9 +188,16 @@ impl SourceResolver for StreamResolver {
         }])
     }
 
+    /// Live streams have no stable loudness worth caching.
+    async fn cache_key(&self, track: &Track) -> Option<String> {
+        (!track.is_stream).then(|| track.locator.clone())
+    }
+
     async fn open(&self, track: &Track) -> anyhow::Result<MediaInput> {
+        // Locators may come from stored playlists or plugins: re-validate them.
+        let url = self.network.check(&track.locator).await?;
         Ok(MediaInput::Url {
-            url: track.locator.clone(),
+            url,
             headers: BTreeMap::new(),
         })
     }
@@ -154,7 +209,7 @@ mod tests {
 
     #[test]
     fn accepts_streams_only() {
-        let r = StreamResolver::new();
+        let r = StreamResolver::new(NetworkPolicy::default(), None);
         assert!(r.accepts("https://radio.example.com/live.mp3"));
         assert!(r.accepts("https://radio.example.com/list.pls?x=1"));
         assert!(r.accepts("radio: https://radio.example.com/live"));
@@ -172,5 +227,31 @@ mod tests {
             parse_playlist(pls),
             vec!["http://b.example/1", "http://b.example/2"]
         );
+    }
+
+    #[tokio::test]
+    async fn tampered_locators_fail_to_open() {
+        let r = StreamResolver::new(NetworkPolicy::default(), None);
+        let track = Track {
+            source: StreamResolver::ID.into(),
+            locator: "http://169.254.169.254/latest/meta-data".into(),
+            title: "x".into(),
+            artist: None,
+            album: None,
+            duration: None,
+            thumbnail: None,
+            is_stream: true,
+        };
+        assert!(r.open(&track).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn refuses_local_targets() {
+        let r = StreamResolver::new(NetworkPolicy::default(), None);
+        let err = r
+            .resolve("radio: http://127.0.0.1:8087/live.m3u")
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("private"), "{err}");
     }
 }

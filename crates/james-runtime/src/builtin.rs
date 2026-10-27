@@ -223,15 +223,22 @@ pub fn format_duration(d: Duration) -> String {
     }
 }
 
-/// Parses `90`, `1:30`, `1:02:03`.
+/// Parses `90`, `1:30`, `1:02:03` (at most three parts, no overflow).
 pub fn parse_duration(input: &str) -> Option<Duration> {
+    let parts: Vec<&str> = input.split(':').collect();
+    if parts.len() > 3 {
+        return None;
+    }
     let mut secs = 0u64;
-    for part in input.split(':') {
-        secs = secs * 60 + part.trim().parse::<u64>().ok()?;
+    for part in parts {
+        secs = secs
+            .checked_mul(60)?
+            .checked_add(part.trim().parse::<u64>().ok()?)?;
     }
     Some(Duration::from_secs(secs))
 }
 
+/// Track description for chat replies; titles come from websites, so markup is neutralised.
 fn describe(item: &QueueItem) -> String {
     let mut text = match &item.track.artist {
         Some(artist) => format!("{} – {}", artist, item.track.title),
@@ -240,7 +247,7 @@ fn describe(item: &QueueItem) -> String {
     if let Some(d) = item.track.duration {
         text.push_str(&format!(" ({})", format_duration(d)));
     }
-    text
+    james_core::text::escape_markup(&text)
 }
 
 fn added_message(items: &[QueueItem], verb: &str) -> String {
@@ -347,10 +354,10 @@ fn volume(ctx: &CommandContext) -> Output<'_> {
             return Ok(Some(format!("Volume: {current}")));
         }
         let arg = ctx.args.as_str();
-        let value: i32 = if let Some(delta) = arg.strip_prefix('+') {
-            i32::from(current) + delta.parse::<i32>()?
+        let value: i64 = if let Some(delta) = arg.strip_prefix('+') {
+            i64::from(current).saturating_add(delta.parse::<i64>()?)
         } else if let Some(delta) = arg.strip_prefix('-') {
-            i32::from(current) - delta.parse::<i32>()?
+            i64::from(current).saturating_sub(delta.parse::<i64>()?)
         } else {
             arg.parse()?
         };
@@ -368,7 +375,10 @@ fn nowplaying(ctx: &CommandContext) -> Output<'_> {
                 let position = format_duration(Duration::from_millis(status.position_ms));
                 let mut text = format!("Now playing: {} [{position}]", describe(&item));
                 if let Some(by) = item.requested_by {
-                    text.push_str(&format!(", requested by {}", by.name));
+                    text.push_str(&format!(
+                        ", requested by {}",
+                        james_core::text::escape_markup(&by.name)
+                    ));
                 }
                 if status.paused {
                     text.push_str(" (paused)");
@@ -421,7 +431,7 @@ fn position_arg(arg: &str) -> anyhow::Result<usize> {
 
 fn remove(ctx: &CommandContext) -> Output<'_> {
     Box::pin(async move {
-        let item = ctx.instance.remove(position_arg(require_args(ctx)?)?).await?;
+        let item = ctx.instance.remove_at(position_arg(require_args(ctx)?)?).await?;
         Ok(Some(format!("Removed: {}", describe(&item))))
     })
 }
@@ -432,9 +442,8 @@ fn move_item(ctx: &CommandContext) -> Output<'_> {
         let (Some(from), Some(to)) = (parts.next(), parts.next()) else {
             bail!("usage: move <from> <to>")
         };
-        ctx.instance
-            .move_item(position_arg(from)?, position_arg(to)?)
-            .await?;
+        let item = ctx.instance.item_at(position_arg(from)?).await?;
+        ctx.instance.move_item(item, position_arg(to)?).await?;
         Ok(Some("Moved.".into()))
     })
 }
@@ -486,7 +495,7 @@ fn seek(ctx: &CommandContext) -> Output<'_> {
         }
         let position = Duration::from_millis(status.position_ms);
         let target = if let Some(delta) = arg.strip_prefix('+') {
-            position + parse_duration(delta).ok_or_else(|| anyhow!("invalid time"))?
+            position.saturating_add(parse_duration(delta).ok_or_else(|| anyhow!("invalid time"))?)
         } else if let Some(delta) = arg.strip_prefix('-') {
             position.saturating_sub(parse_duration(delta).ok_or_else(|| anyhow!("invalid time"))?)
         } else {
@@ -507,6 +516,12 @@ mod tests {
         assert_eq!(parse_duration("1:30"), Some(Duration::from_secs(90)));
         assert_eq!(parse_duration("1:02:03"), Some(Duration::from_secs(3723)));
         assert_eq!(parse_duration("x"), None);
+        assert_eq!(parse_duration("1:2:3:4"), None);
+        assert_eq!(
+            parse_duration(&u64::MAX.to_string()).map(|d| d.as_secs()),
+            Some(u64::MAX)
+        );
+        assert_eq!(parse_duration(&format!("{}:00", u64::MAX)), None);
         assert_eq!(format_duration(Duration::from_secs(3723)), "1:02:03");
         assert_eq!(format_duration(Duration::from_secs(65)), "1:05");
     }

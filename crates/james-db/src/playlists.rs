@@ -136,9 +136,23 @@ impl Db {
     }
 
     /// Appends tracks to a playlist.
-    pub async fn append_playlist_tracks<T: Serialize>(&self, id: i64, tracks: &[T]) -> Result<()> {
+    /// Appends tracks; fails with [`DbError::Invalid`] if the playlist would exceed `max` tracks
+    /// (checked in the same transaction, so concurrent appends cannot exceed it).
+    pub async fn append_playlist_tracks<T: Serialize>(
+        &self,
+        id: i64,
+        tracks: &[T],
+        max: usize,
+    ) -> Result<()> {
         self.playlist(id).await?;
         let mut tx = self.pool().begin().await?;
+        let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM playlist_entries WHERE playlist_id = ?")
+            .bind(id)
+            .fetch_one(&mut *tx)
+            .await?;
+        if count as usize + tracks.len() > max {
+            return Err(DbError::Invalid(format!("a playlist holds at most {max} tracks")));
+        }
         let start: i64 = sqlx::query_scalar(
             "SELECT COALESCE(MAX(position) + 1, 0) FROM playlist_entries WHERE playlist_id = ?",
         )
@@ -171,8 +185,14 @@ mod tests {
     async fn playlist_tracks() {
         let db = Db::memory().await.unwrap();
         let list = db.create_playlist("Party", None).await.unwrap();
-        db.append_playlist_tracks(list.id, &["a", "b"]).await.unwrap();
-        db.append_playlist_tracks(list.id, &["c"]).await.unwrap();
+        db.append_playlist_tracks(list.id, &["a", "b"], 5000)
+            .await
+            .unwrap();
+        db.append_playlist_tracks(list.id, &["c"], 5000).await.unwrap();
+        assert!(
+            db.append_playlist_tracks(list.id, &["d"], 3).await.is_err(),
+            "limit enforced"
+        );
         let tracks: Vec<String> = db.playlist_tracks(list.id).await.unwrap();
         assert_eq!(tracks, ["a", "b", "c"]);
         assert_eq!(db.playlist(list.id).await.unwrap().track_count, 3);

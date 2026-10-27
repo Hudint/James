@@ -12,12 +12,17 @@ james-core.workspace = true
 james-audio = { path = "../james-audio" }
 anyhow.workspace = true
 async-trait.workspace = true
+futures.workspace = true
+parking_lot = "0.12"
 rand = "0.9"
 serde.workspace = true
 serde_json.workspace = true
+thiserror.workspace = true
 tokio.workspace = true
 tracing.workspace = true
 
 [dev-dependencies]
 james-sources = { path = "../james-sources" }
 tempfile = "3"
+parking_lot = "0.12"
+serde_json.workspace = true

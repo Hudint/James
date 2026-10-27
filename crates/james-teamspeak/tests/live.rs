@@ -97,9 +97,13 @@ async fn plays_audio_and_chats() {
     let bot = tokio::spawn(async move { adapter.run(&mut ctx).await });
 
     let bot_id = loop {
-        match events.recv().await.unwrap() {
-            PlatformEvent::Connected { snapshot } => break snapshot.own_client.unwrap(),
-            _ => continue,
+        match events.recv().await {
+            Some(PlatformEvent::Connected { snapshot }) => break snapshot.own_client.unwrap(),
+            Some(PlatformEvent::Disconnected { reason }) => {
+                panic!("bot could not connect: {reason} (TS3 servers temporarily ban clients that reconnect too often)")
+            }
+            Some(_) => continue,
+            None => panic!("bot connection task ended: {:?}", bot.await),
         }
     };
 
@@ -177,7 +181,11 @@ async fn plays_audio_and_chats() {
             item = listener_events.next() => {
                 match item.unwrap().unwrap() {
                     StreamItem::Audio(packet) => {
-                        if let AudioData::S2C { data, .. } = packet.data().data() {
+                        // Only the bot under test (other bots may play in the same channel).
+                        if let AudioData::S2C { data, from, .. } = packet.data().data() {
+                            if *from != bot_ts_id.0 {
+                                continue;
+                            }
                             if !data.is_empty() {
                                 packets += 1;
                                 let mut out = vec![0f32; 5760 * 2];
@@ -216,7 +224,11 @@ async fn plays_audio_and_chats() {
     let drain_until = tokio::time::Instant::now() + Duration::from_millis(500);
     while let Ok(Some(Ok(item))) = tokio::time::timeout_at(drain_until, listener.events().next()).await {
         if let StreamItem::Audio(packet) = item {
-            if let AudioData::S2C { data, .. } = packet.data().data() {
+            // Only the bot under test (other bots may play in the same channel).
+            if let AudioData::S2C { data, from, .. } = packet.data().data() {
+                if *from != bot_ts_id.0 {
+                    continue;
+                }
                 if !data.is_empty() {
                     packets += 1;
                 }

@@ -1,13 +1,20 @@
 //! Conversion of tsclientlib's book (server state) and events into platform-neutral types.
 
+use std::collections::HashMap;
+
 use james_core::platform::{self, MessageTarget, PlatformEvent, Snapshot};
 use tsclientlib::data::{self, Connection};
 use tsclientlib::events::{Event, PropertyId, PropertyValue};
 use tsclientlib::{ChannelId, Invoker};
 
 pub fn snapshot(state: &Connection) -> Snapshot {
-    let mut channels: Vec<_> = state.channels.values().map(channel).collect();
-    channels.sort_by_key(|c| c.order);
+    let channels = ordered_channels(state)
+        .into_iter()
+        .map(|(rank, c)| platform::Channel {
+            order: rank,
+            ..channel(c)
+        })
+        .collect();
     Snapshot {
         server: Some(platform::ServerInfo {
             name: state.server.name.clone(),
@@ -27,6 +34,49 @@ pub fn snapshot(state: &Connection) -> Snapshot {
             })
             .collect(),
     }
+}
+
+/// Channels in tree order (depth first), each with its rank. TeamSpeak's `order` field is
+/// the id of the sibling above, so siblings form a linked list per parent.
+fn ordered_channels(state: &Connection) -> Vec<(i64, &data::Channel)> {
+    let mut children: HashMap<ChannelId, Vec<&data::Channel>> = HashMap::new();
+    for c in state.channels.values() {
+        children.entry(c.parent).or_default().push(c);
+    }
+    fn emit<'a>(
+        parent: ChannelId,
+        children: &HashMap<ChannelId, Vec<&'a data::Channel>>,
+        depth: usize,
+        out: &mut Vec<(i64, &'a data::Channel)>,
+    ) {
+        // Guards against malformed (cyclic) parent links.
+        if depth > 64 {
+            return;
+        }
+        let siblings = children.get(&parent).map(Vec::as_slice).unwrap_or_default();
+        for c in sort_siblings(siblings, |c| c.id.0, |c| c.order.0) {
+            out.push((out.len() as i64, c));
+            emit(c.id, children, depth + 1, out);
+        }
+    }
+    let mut out = Vec::with_capacity(state.channels.len());
+    emit(ChannelId(0), &children, 0, &mut out);
+    out
+}
+
+/// Follows the `order` links (id of the item above, 0 = first); unlinked items go last by id.
+fn sort_siblings<'a, T>(siblings: &[&'a T], id: impl Fn(&T) -> u64, above: impl Fn(&T) -> u64) -> Vec<&'a T> {
+    let mut by_above: HashMap<u64, &T> = siblings.iter().map(|c| (above(c), *c)).collect();
+    let mut sorted = Vec::with_capacity(siblings.len());
+    let mut previous = 0;
+    while let Some(c) = by_above.remove(&previous) {
+        sorted.push(c);
+        previous = id(c);
+    }
+    let mut rest: Vec<_> = by_above.into_values().collect();
+    rest.sort_by_key(|c| id(c));
+    sorted.extend(rest);
+    sorted
 }
 
 fn channel_ref(id: ChannelId) -> Option<String> {
@@ -163,4 +213,17 @@ fn client_update(state: &Connection, id: tsclientlib::ClientId) -> Option<Platfo
     state.clients.get(&id).map(|c| PlatformEvent::ClientUpdate {
         client: client(state, c),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn siblings_follow_order_links() {
+        // (id, id of the sibling above)
+        let (a, b, c, orphan) = ((5u64, 0u64), (2, 5), (9, 2), (7, 99));
+        let sorted = sort_siblings(&[&c, &orphan, &a, &b], |x| x.0, |x| x.1);
+        assert_eq!(sorted.iter().map(|x| x.0).collect::<Vec<_>>(), [5, 2, 9, 7]);
+    }
 }

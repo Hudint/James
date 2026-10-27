@@ -1,0 +1,33 @@
+[package]
+name = "james-api"
+description = "HTTP REST + WebSocket API of James"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+james-core.workspace = true
+james-db = { path = "../james-db" }
+james-runtime = { path = "../james-runtime" }
+anyhow.workspace = true
+async-trait.workspace = true
+axum = { version = "0.8", features = ["ws", "multipart", "macros"] }
+axum-extra = { version = "0.12", features = ["cookie"] }
+futures.workspace = true
+parking_lot = "0.12"
+rand = "0.9"
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+time = "0.3"
+tokio.workspace = true
+tower-http = { version = "0.6", features = ["trace", "fs", "limit"] }
+tracing.workspace = true
+
+[dev-dependencies]
+tokio-tungstenite = "0.30"
+tempfile = "3"
+tower = { version = "0.5", features = ["util"] }
+http-body-util = "0.1"

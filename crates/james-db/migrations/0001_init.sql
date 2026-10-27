@@ -156,5 +156,5 @@ INSERT INTO role_permissions (role_id, permission)
     WHERE name = 'dj';
 INSERT INTO role_permissions (role_id, permission)
     SELECT id, p.permission FROM roles,
-        (SELECT 'playback.play' AS permission UNION ALL SELECT 'playback.control' UNION ALL SELECT 'playback.volume' UNION ALL SELECT 'queue.manage') p
+        (SELECT 'playback.play' AS permission) p
     WHERE name = 'everyone';

@@ -1,0 +1,262 @@
+<script lang="ts">
+  import { api } from '$lib/api';
+  import { formatDuration } from '$lib/format';
+  import { i18n, t } from '$lib/i18n/index.svelte';
+  import { positionOf } from '$lib/live.svelte';
+  import { can, reportError } from '$lib/session.svelte';
+  import type { InstanceStatus, RepeatMode } from '$lib/types';
+  import Icon from './Icon.svelte';
+
+  let { id, status }: { id: string; status: InstanceStatus } = $props();
+
+  let now = $state(performance.now());
+  $effect(() => {
+    const timer = setInterval(() => (now = performance.now()), 250);
+    return () => clearInterval(timer);
+  });
+
+  let track = $derived(status.current?.track ?? null);
+  let duration = $derived(track?.durationMs ?? null);
+  let position = $derived(positionOf(id, now));
+  let control = $derived(can('playback.control', id));
+  let playing = $derived(!!status.current && !status.paused);
+  const percent = (value: number) => new Intl.NumberFormat(i18n.locale, { style: 'percent' }).format(value / 100);
+  let canVolume = $derived(can('playback.volume', id));
+  let canShuffle = $derived(can('queue.manage', id));
+
+  // While dragging, the slider shows the drag position instead of the live one.
+  let seeking = $state<number | null>(null);
+  let volume = $state(0);
+  let volumeDirty = false;
+  $effect(() => {
+    if (!volumeDirty) volume = status.volume;
+  });
+
+  async function run(action: () => Promise<unknown>) {
+    try {
+      await action();
+    } catch (e) {
+      reportError(e);
+    }
+  }
+
+  let volumeTimer: ReturnType<typeof setTimeout> | undefined;
+  function onVolume() {
+    volumeDirty = true;
+    clearTimeout(volumeTimer);
+    volumeTimer = setTimeout(async () => {
+      await run(() => api.volume(id, volume));
+      volumeDirty = false;
+    }, 120);
+  }
+
+  function commitSeek() {
+    if (seeking !== null) {
+      const target = seeking;
+      seeking = null;
+      void run(() => api.seek(id, target));
+    }
+  }
+
+  const nextRepeat: Record<RepeatMode, RepeatMode> = { off: 'all', all: 'one', one: 'off' };
+  let repeatLabel = $derived(
+    status.repeat === 'one' ? t('player.repeatOne') : status.repeat === 'all' ? t('player.repeatAll') : t('player.repeatOff'),
+  );
+</script>
+
+<section class="card player" aria-labelledby="now-playing-title">
+  <div class="art" aria-hidden="true">
+    {#if track?.thumbnail}
+      <img src={track.thumbnail} alt="" referrerpolicy="no-referrer" />
+    {:else}
+      <Icon name={track?.isStream ? 'radio' : 'music'} size={40} />
+    {/if}
+  </div>
+
+  <div class="info">
+    <h2 id="now-playing-title" class="label muted">{t('player.nowPlaying')}</h2>
+    {#if track}
+      <p class="title truncate" title={track.title}>{track.title}</p>
+      <p class="artist truncate muted">
+        {[track.artist, status.current?.requestedBy ? t('player.requestedBy', { name: status.current.requestedBy.name }) : null]
+          .filter(Boolean)
+          .join(' · ')}
+      </p>
+    {:else}
+      <p class="title">{t('player.nothing')}</p>
+      <p class="muted small">{t('player.nothingHint')}</p>
+    {/if}
+  </div>
+
+  <div class="progress">
+    {#if status.loading}
+      <p class="muted small" aria-live="polite">{t('player.loading')}</p>
+    {:else if track && track.isStream}
+      <span class="badge danger"><span class="dot"></span>{t('player.live')}</span>
+      <span class="muted small">{formatDuration(position)}</span>
+    {:else if track}
+      <span class="time">{formatDuration(seeking ?? position)}</span>
+      <input
+        type="range"
+        min="0"
+        max={duration ?? 0}
+        step="1000"
+        value={seeking ?? position}
+        disabled={!control || !duration}
+        aria-label={t('player.seek')}
+        aria-valuetext={formatDuration(seeking ?? position)}
+        oninput={(e) => (seeking = Number((e.target as HTMLInputElement).value))}
+        onchange={commitSeek}
+      />
+      <span class="time">{formatDuration(duration)}</span>
+    {/if}
+  </div>
+
+  <div class="controls">
+    <button
+      class="icon-btn"
+      class:active={status.shuffle}
+      disabled={!canShuffle}
+      onclick={() => run(() => api.shuffle(id, !status.shuffle))}
+      aria-label={t('player.shuffle')}
+      aria-pressed={status.shuffle}
+      title={t('player.shuffle')}
+    >
+      <Icon name="shuffle" />
+    </button>
+    <button class="icon-btn" disabled={!control} onclick={() => run(() => api.previous(id))} aria-label={t('player.previous')} title={t('player.previous')}>
+      <Icon name="previous" />
+    </button>
+    <!-- One toggle button (not two swapping ones) so keyboard focus stays on it. -->
+    <button
+      class="icon-btn large"
+      disabled={!control || !status.current}
+      onclick={() => run(() => (playing ? api.pause(id) : api.resume(id)))}
+      aria-label={playing ? t('player.pause') : t('player.resume')}
+      title={playing ? t('player.pause') : t('player.resume')}
+    >
+      <Icon name={playing ? 'pause' : 'play'} size={26} />
+    </button>
+    <button class="icon-btn" disabled={!control || (!status.current && status.queueLength === 0)} onclick={() => run(() => api.skip(id))} aria-label={t('player.next')} title={t('player.next')}>
+      <Icon name="next" />
+    </button>
+    <button
+      class="icon-btn"
+      class:active={status.repeat !== 'off'}
+      disabled={!control}
+      onclick={() => run(() => api.repeat(id, nextRepeat[status.repeat]))}
+      aria-label={repeatLabel}
+      title={repeatLabel}
+    >
+      <Icon name={status.repeat === 'one' ? 'repeatOne' : 'repeat'} />
+    </button>
+    <button class="icon-btn stop" disabled={!control || !status.current} onclick={() => run(() => api.stopPlayback(id))} aria-label={t('player.stop')} title={t('player.stop')}>
+      <Icon name="stop" />
+    </button>
+  </div>
+
+  <div class="volume">
+    <Icon name={volume === 0 ? 'volumeMute' : 'volume'} size={18} />
+    <input
+      type="range"
+      min="0"
+      max="100"
+      bind:value={volume}
+      oninput={onVolume}
+      disabled={!canVolume}
+      aria-label={t('player.volume')}
+      aria-valuetext={percent(volume)}
+    />
+    <span class="small muted vol-value">{percent(volume)}</span>
+  </div>
+</section>
+
+<style>
+  .player {
+    display: grid;
+    grid-template-columns: 96px 1fr;
+    grid-template-areas:
+      'art info'
+      'progress progress'
+      'controls controls'
+      'volume volume';
+    gap: var(--space-4);
+    align-items: center;
+  }
+  .art {
+    grid-area: art;
+    width: 96px;
+    height: 96px;
+    border-radius: var(--radius);
+    background: var(--accent-soft);
+    color: var(--accent);
+    display: grid;
+    place-items: center;
+    overflow: hidden;
+  }
+  .art img {
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+  }
+  .info {
+    grid-area: info;
+    min-width: 0;
+  }
+  .label {
+    font-size: var(--text-xs);
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    font-weight: 700;
+    margin-bottom: var(--space-1);
+  }
+  .title {
+    font-size: var(--text-xl);
+    font-weight: 650;
+  }
+  .progress {
+    grid-area: progress;
+    display: flex;
+    align-items: center;
+    gap: var(--space-3);
+    min-height: 24px;
+  }
+  .time {
+    font-variant-numeric: tabular-nums;
+    font-size: var(--text-sm);
+    color: var(--text-muted);
+    min-width: 3.5em;
+    text-align: center;
+  }
+  .controls {
+    grid-area: controls;
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    gap: var(--space-2);
+  }
+  .volume {
+    grid-area: volume;
+    display: flex;
+    align-items: center;
+    gap: var(--space-3);
+    color: var(--text-muted);
+    max-width: 320px;
+    width: 100%;
+    justify-self: center;
+  }
+  .vol-value {
+    min-width: 3.5em;
+    text-align: right;
+    font-variant-numeric: tabular-nums;
+  }
+  @media (min-width: 720px) {
+    .player {
+      grid-template-columns: 128px 1fr;
+    }
+    .art {
+      width: 128px;
+      height: 128px;
+    }
+  }
+</style>

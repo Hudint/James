@@ -29,9 +29,18 @@ pub struct Identity {
     pub name: String,
 }
 
+/// Longer passwords are rejected so hashing cannot be abused for denial of service.
+pub const MAX_PASSWORD_LEN: usize = 1024;
+
+/// argon2 is CPU and memory heavy: run it off the async workers, a few at a time.
+static HASH_SLOTS: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(4);
+
 pub fn hash_password(password: &str) -> Result<String> {
-    if password.len() < 8 {
+    if password.chars().count() < 8 {
         return Err(DbError::Invalid("password must be at least 8 characters".into()));
+    }
+    if password.len() > MAX_PASSWORD_LEN {
+        return Err(DbError::Invalid("password is too long".into()));
     }
     let salt = SaltString::generate(&mut OsRng);
     Argon2::default()
@@ -41,7 +50,41 @@ pub fn hash_password(password: &str) -> Result<String> {
 }
 
 fn verify(hash: &str, password: &str) -> bool {
-    PasswordHash::new(hash).is_ok_and(|h| Argon2::default().verify_password(password.as_bytes(), &h).is_ok())
+    password.len() <= MAX_PASSWORD_LEN
+        && PasswordHash::new(hash)
+            .is_ok_and(|h| Argon2::default().verify_password(password.as_bytes(), &h).is_ok())
+}
+
+/// A real hash (same parameters as stored ones) to verify against for unknown users.
+fn dummy_hash() -> &'static str {
+    static DUMMY: std::sync::LazyLock<String> =
+        std::sync::LazyLock::new(|| hash_password("dummy-password-for-timing").expect("valid password"));
+    &DUMMY
+}
+
+async fn blocking<T: Send + 'static>(f: impl FnOnce() -> T + Send + 'static) -> Result<T> {
+    let _slot = HASH_SLOTS
+        .acquire()
+        .await
+        .map_err(|_| DbError::Invalid("shutting down".into()))?;
+    tokio::task::spawn_blocking(f)
+        .await
+        .map_err(|e| DbError::Invalid(e.to_string()))
+}
+
+async fn hash_password_async(password: Option<&str>) -> Result<Option<String>> {
+    match password {
+        Some(p) => {
+            let p = p.to_owned();
+            Ok(Some(blocking(move || hash_password(&p)).await??))
+        }
+        None => Ok(None),
+    }
+}
+
+async fn verify_async(hash: String, password: &str) -> Result<bool> {
+    let password = password.to_owned();
+    blocking(move || verify(&hash, &password)).await
 }
 
 const SELECT: &str =
@@ -73,7 +116,7 @@ impl Db {
         if username.is_empty() || username.len() > 64 {
             return Err(DbError::Invalid("username must be 1-64 characters".into()));
         }
-        let hash = password.map(hash_password).transpose()?;
+        let hash = hash_password_async(password).await?;
         let id = sqlx::query(
             "INSERT INTO users (username, password_hash, is_admin, created_at) VALUES (?, ?, ?, ?)",
         )
@@ -86,6 +129,30 @@ impl Db {
         .map_err(conflict)?
         .last_insert_rowid();
         self.user(id).await
+    }
+
+    /// Creates the first administrator, atomically failing with [`DbError::Conflict`] if any
+    /// account exists already (concurrent setups cannot create two admins).
+    pub async fn create_first_admin(&self, username: &str, password: &str) -> Result<User> {
+        let username = username.trim();
+        if username.is_empty() || username.len() > 64 {
+            return Err(DbError::Invalid("username must be 1-64 characters".into()));
+        }
+        let hash = hash_password_async(Some(password)).await?;
+        let result = sqlx::query(
+            "INSERT INTO users (username, password_hash, is_admin, created_at)
+             SELECT ?, ?, 1, ? WHERE NOT EXISTS (SELECT 1 FROM users)",
+        )
+        .bind(username)
+        .bind(hash)
+        .bind(now())
+        .execute(self.pool())
+        .await
+        .map_err(conflict)?;
+        if result.rows_affected() == 0 {
+            return Err(DbError::Conflict);
+        }
+        self.user(result.last_insert_rowid()).await
     }
 
     pub async fn user(&self, id: i64) -> Result<User> {
@@ -138,18 +205,24 @@ impl Db {
                 .fetch_optional(self.pool())
                 .await?;
         match row {
-            Some((id, Some(hash), false)) if verify(&hash, password) => Ok(Some(self.user(id).await?)),
-            Some(_) => Ok(None),
-            None => {
-                // Spend comparable time to not reveal whether the user exists.
-                let _ = verify("$argon2id$v=19$m=19456,t=2,p=1$c29tZXNhbHQ$aGFzaA", password);
+            Some((id, Some(hash), false)) => {
+                if verify_async(hash, password).await? {
+                    Ok(Some(self.user(id).await?))
+                } else {
+                    Ok(None)
+                }
+            }
+            _ => {
+                // Without a usable account, spend the same time so the response does not
+                // reveal whether the username exists.
+                verify_async(dummy_hash().to_owned(), password).await?;
                 Ok(None)
             }
         }
     }
 
     pub async fn set_password(&self, id: i64, password: Option<&str>) -> Result<()> {
-        let hash = password.map(hash_password).transpose()?;
+        let hash = hash_password_async(password).await?;
         self.update_user_field(id, "password_hash", hash).await
     }
 
@@ -338,7 +411,25 @@ mod tests {
     }
 
     #[test]
-    fn rejects_short_passwords() {
+    fn dummy_hash_is_a_real_hash() {
+        assert!(PasswordHash::new(dummy_hash()).is_ok());
+        assert!(!verify(dummy_hash(), "anything"));
+    }
+
+    #[test]
+    fn rejects_short_and_huge_passwords() {
         assert!(hash_password("short").is_err());
+        assert!(hash_password(&"x".repeat(MAX_PASSWORD_LEN + 1)).is_err());
+    }
+
+    #[tokio::test]
+    async fn first_admin_only_once() {
+        let db = Db::memory().await.unwrap();
+        let (a, b) = tokio::join!(
+            db.create_first_admin("one", "password-one"),
+            db.create_first_admin("two", "password-two")
+        );
+        assert_eq!([a.is_ok(), b.is_ok()].iter().filter(|ok| **ok).count(), 1);
+        assert_eq!(db.user_count().await.unwrap(), 1);
     }
 }

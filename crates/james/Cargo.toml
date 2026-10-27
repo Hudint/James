@@ -9,10 +9,17 @@ rust-version.workspace = true
 
 [dependencies]
 james-core.workspace = true
+james-api = { path = "../james-api" }
+james-db = { path = "../james-db" }
 james-runtime = { path = "../james-runtime" }
 james-sources = { path = "../james-sources" }
 james-teamspeak = { path = "../james-teamspeak" }
 anyhow.workspace = true
+async-trait.workspace = true
+axum = "0.8"
+futures.workspace = true
+parking_lot = "0.12"
+url = "2"
 serde_json.workspace = true
 serde.workspace = true
 tokio.workspace = true

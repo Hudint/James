@@ -91,9 +91,46 @@ impl PlatformFactory for TeamSpeakFactory {
         settings: &serde_json::Value,
         credentials: Option<serde_json::Value>,
     ) -> anyhow::Result<Box<dyn PlatformAdapter>> {
-        let config: TeamSpeakConfig =
-            serde_json::from_value(settings.clone()).context("invalid TeamSpeak settings")?;
-        Ok(Box::new(TeamSpeakAdapter::new(config, credentials)?))
+        Ok(Box::new(TeamSpeakAdapter::new(
+            parse_settings(settings)?,
+            credentials,
+        )?))
+    }
+
+    fn validate(&self, settings: &serde_json::Value) -> anyhow::Result<()> {
+        let config = parse_settings(settings)?;
+        if config.address.trim().is_empty() {
+            bail!("address must not be empty");
+        }
+        if config.nickname.trim().is_empty() || config.nickname.chars().count() > 30 {
+            bail!("nickname must be 1-30 characters");
+        }
+        if let Some(version) = &config.version {
+            BASE64_STANDARD
+                .decode(&version.signature)
+                .context("invalid version signature")?;
+        }
+        Ok(())
+    }
+
+    fn capabilities(&self) -> Capabilities {
+        capabilities()
+    }
+}
+
+fn parse_settings(settings: &serde_json::Value) -> anyhow::Result<TeamSpeakConfig> {
+    serde_json::from_value(settings.clone()).context("invalid TeamSpeak settings")
+}
+
+fn capabilities() -> Capabilities {
+    Capabilities {
+        multi_session: false,
+        pokes: true,
+        server_groups: true,
+        channel_groups: true,
+        avatars: true,
+        video: false,
+        max_bitrate: 256_000,
     }
 }
 
@@ -148,15 +185,7 @@ impl TeamSpeakAdapter {
 #[async_trait]
 impl PlatformAdapter for TeamSpeakAdapter {
     fn capabilities(&self) -> Capabilities {
-        Capabilities {
-            multi_session: false,
-            pokes: true,
-            server_groups: true,
-            channel_groups: true,
-            avatars: true,
-            video: false,
-            max_bitrate: 256_000,
-        }
+        capabilities()
     }
 
     async fn run(&mut self, ctx: &mut PlatformContext) -> anyhow::Result<()> {
@@ -182,6 +211,8 @@ impl PlatformAdapter for TeamSpeakAdapter {
         let mut session = Session {
             pending: HashMap::new(),
             can_send_audio: true,
+            reconnecting: false,
+            audio_closed: false,
         };
         let result = session.run(&mut con, ctx).await;
         if result.is_err() {
@@ -218,6 +249,10 @@ impl TeamSpeakAdapter {
 struct Session {
     pending: HashMap<MessageHandle, Reply<()>>,
     can_send_audio: bool,
+    /// tsclientlib is re-establishing the connection; ids in the book change.
+    reconnecting: bool,
+    /// The audio sender was dropped (engine gone); stop polling it.
+    audio_closed: bool,
 }
 
 enum Input {
@@ -235,11 +270,14 @@ impl Session {
                 tokio::select! {
                     e = events.next() => Input::Event(e),
                     c = ctx.commands.recv() => Input::Command(c),
-                    a = ctx.audio.recv() => Input::Audio(a),
+                    a = ctx.audio.recv(), if !self.audio_closed => Input::Audio(a),
                 }
             };
+            // Replies whose caller gave up (timeout) are dropped instead of accumulating.
+            self.pending.retain(|_, reply| !reply.is_closed());
             match input {
-                Input::Event(None) => return Ok("connection closed".into()),
+                // The server closed the connection (kick, ban, shutdown): reconnect.
+                Input::Event(None) => bail!("connection closed by the server"),
                 Input::Event(Some(Err(e))) => return Err(e).context("connection error"),
                 Input::Event(Some(Ok(item))) => self.handle_item(con, ctx, item),
                 Input::Command(None) => {
@@ -251,7 +289,7 @@ impl Session {
                     return Ok(reason);
                 }
                 Input::Command(Some(command)) => self.handle_command(con, command),
-                Input::Audio(None) => {}
+                Input::Audio(None) => self.audio_closed = true,
                 Input::Audio(Some(frame)) => {
                     if self.can_send_audio {
                         let packet = OutAudio::new(&AudioData::C2S {
@@ -272,6 +310,15 @@ impl Session {
         match item {
             StreamItem::BookEvents(events) => {
                 let Ok(state) = con.get_state() else { return };
+                if self.reconnecting {
+                    // After a reconnect all client ids are new: publish a fresh snapshot.
+                    self.reconnecting = false;
+                    tracing::info!("reconnected");
+                    let _ = ctx.events.send(PlatformEvent::Connected {
+                        snapshot: snapshot(state),
+                    });
+                    return;
+                }
                 for event in events {
                     if let Some(event) = convert::event(state, &event) {
                         let _ = ctx.events.send(event);
@@ -289,6 +336,13 @@ impl Session {
             }
             StreamItem::DisconnectedTemporarily(reason) => {
                 tracing::warn!(?reason, "temporarily disconnected, reconnecting");
+                self.reconnecting = true;
+                for (_, reply) in self.pending.drain() {
+                    let _ = reply.send(Err(anyhow!("connection lost")));
+                }
+                let _ = ctx.events.send(PlatformEvent::Disconnected {
+                    reason: format!("{reason:?}"),
+                });
             }
             _ => {}
         }
@@ -403,7 +457,11 @@ impl Session {
                 let result = with_client(con, &client, |c| Ok(c.remove_server_group(parse_group(&group)?)));
                 self.send(con, result, reply);
             }
-            PlatformCommand::Disconnect { .. } => unreachable!("handled by the session loop"),
+            PlatformCommand::Extension { name, reply, .. } => {
+                let _ = reply.send(Err(anyhow!("unsupported TeamSpeak extension '{name}'")));
+            }
+            // Handled by the session loop before dispatching.
+            PlatformCommand::Disconnect { .. } => {}
         }
     }
 

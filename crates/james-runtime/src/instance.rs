@@ -1,21 +1,29 @@
 //! A single bot instance: platform connection + audio engine + player.
 //!
 //! The instance runs as one control task. Everything else (adapter, engine,
-//! track opening, command execution) runs in separate tasks and talks to it
-//! through channels, so slow operations never block playback control.
+//! track opening, command execution, description updates) runs in separate
+//! tasks and talks to it through channels, so slow operations never block
+//! playback control.
+//!
+//! Every playback gets a fresh *generation* number that is used as the engine
+//! request id. Events and open results carrying an older generation are
+//! ignored, so skip/previous/play sequences can never act on stale events.
 
+use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::{anyhow, Context};
-use james_audio::{AudioEngine, EngineConfig, EngineEvent, PlayRequest};
+use james_audio::{EngineConfig, EngineEvent, PlayRequest};
 use james_core::platform::{
     Client, MessageTarget, PlatformCommand, PlatformContext, PlatformEvent, PlatformId, Snapshot,
 };
 use james_core::source::{MediaInput, Track};
 use serde::{Deserialize, Serialize};
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::{mpsc, oneshot, watch};
+use tokio::task::JoinHandle;
 
+use crate::engine::PlaybackEngine;
 use crate::manager::Services;
 use crate::player::{Player, QueueItem, RepeatMode, Requester};
 
@@ -33,6 +41,37 @@ pub struct InstanceConfig {
     /// Show the current track in the bot's description.
     pub now_playing_description: bool,
     pub autostart: bool,
+}
+
+impl InstanceConfig {
+    /// Checks values that the platform factory does not validate.
+    pub fn validate(&self) -> anyhow::Result<()> {
+        let prefix = &self.command_prefix;
+        if prefix.is_empty() || prefix.chars().count() > 5 || prefix.chars().any(char::is_whitespace) {
+            anyhow::bail!("the command prefix must be 1-5 characters without spaces");
+        }
+        if self.name.trim().is_empty() || self.name.chars().count() > 64 {
+            anyhow::bail!("the name must be 1-64 characters");
+        }
+        self.audio.validate()
+    }
+}
+
+impl AudioSettings {
+    pub fn validate(&self) -> anyhow::Result<()> {
+        if self.volume > 100 {
+            anyhow::bail!("volume must be 0-100");
+        }
+        if !(self.target_lufs.is_finite() && (-40.0..=-5.0).contains(&self.target_lufs)) {
+            anyhow::bail!("the loudness target must be between -40 and -5 LUFS");
+        }
+        if let Some(bitrate) = self.bitrate {
+            if !(16_000..=510_000).contains(&bitrate) {
+                anyhow::bail!("the bitrate must be between 16 and 510 kbit/s");
+            }
+        }
+        Ok(())
+    }
 }
 
 impl Default for InstanceConfig {
@@ -88,12 +127,16 @@ pub struct InstanceStatus {
     pub platform: String,
     pub connected: bool,
     pub current: Option<QueueItem>,
+    /// True while the current track is being opened/buffered and not yet audible.
+    pub loading: bool,
     pub position_ms: u64,
     pub paused: bool,
     pub volume: u8,
     pub repeat: RepeatMode,
     pub shuffle: bool,
     pub queue_length: usize,
+    /// Why the last connection attempt failed (while not connected).
+    pub last_error: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -116,6 +159,10 @@ pub struct EventEnvelope {
     pub instance: String,
     #[serde(flatten)]
     pub event: InstanceEvent,
+    /// Private messages and command lines (which may contain secrets such as `!link`
+    /// codes). Delivered to plugins, but to web clients only with `server.chat.read`.
+    #[serde(skip)]
+    pub sensitive: bool,
 }
 
 type Reply<T> = oneshot::Sender<anyhow::Result<T>>;
@@ -138,12 +185,16 @@ enum Control {
     ShuffleQueue,
     Clear,
     Remove {
-        index: usize,
+        item: u64,
         reply: Reply<QueueItem>,
     },
     Move {
-        from: usize,
+        item: u64,
         to: usize,
+        reply: Reply<()>,
+    },
+    Jump {
+        item: u64,
         reply: Reply<()>,
     },
     Status {
@@ -157,8 +208,9 @@ enum Control {
 
 enum Internal {
     Opened {
-        item: u64,
-        result: anyhow::Result<MediaInput>,
+        generation: u64,
+        /// Decoder input, cached loudness and the cache key it was looked up with.
+        result: anyhow::Result<(MediaInput, Option<f32>, Option<String>)>,
     },
 }
 
@@ -166,18 +218,33 @@ enum Internal {
 #[derive(Clone)]
 pub struct InstanceHandle {
     id: Arc<str>,
+    resolve_slots: Arc<tokio::sync::Semaphore>,
+    platform_id: Arc<str>,
     control: mpsc::UnboundedSender<Control>,
     platform: mpsc::Sender<PlatformCommand>,
     services: Services,
 }
+
+/// Timeout for platform commands (including waiting for a free slot while reconnecting).
+const PLATFORM_TIMEOUT: Duration = Duration::from_secs(10);
 
 impl InstanceHandle {
     pub fn id(&self) -> &str {
         &self.id
     }
 
+    /// Platform of the instance, e.g. `teamspeak`.
+    pub fn platform_id(&self) -> &str {
+        &self.platform_id
+    }
+
     pub fn services(&self) -> &Services {
         &self.services
+    }
+
+    /// Whether the instance task is still running.
+    pub fn is_alive(&self) -> bool {
+        !self.control.is_closed()
     }
 
     fn send(&self, control: Control) -> anyhow::Result<()> {
@@ -194,7 +261,10 @@ impl InstanceHandle {
 
     /// Resolves user input (URL, search, path, …) through the source registry.
     pub async fn resolve(&self, input: &str) -> anyhow::Result<Vec<Track>> {
-        let registry = self.services.sources.read().unwrap().clone();
+        // Bounds the external tools one instance can occupy, so one busy server cannot
+        // starve the shared tool slots of all others.
+        let _slot = self.resolve_slot().await?;
+        let registry = self.services.sources.read().clone();
         registry.resolve(input).await
     }
 
@@ -254,11 +324,45 @@ impl InstanceHandle {
     pub fn clear_queue(&self) -> anyhow::Result<()> {
         self.send(Control::Clear)
     }
-    pub async fn remove(&self, index: usize) -> anyhow::Result<QueueItem> {
-        self.ask(|reply| Control::Remove { index, reply }).await?
+    /// Waits (bounded) for one of the instance's resolve slots.
+    async fn resolve_slot(&self) -> anyhow::Result<tokio::sync::SemaphorePermit<'_>> {
+        match tokio::time::timeout(Duration::from_secs(30), self.resolve_slots.acquire()).await {
+            Ok(Ok(permit)) => Ok(permit),
+            Ok(Err(_)) => Err(anyhow!("instance is shutting down")),
+            Err(_) => Err(anyhow!("the bot is busy, please try again in a moment")),
+        }
     }
-    pub async fn move_item(&self, from: usize, to: usize) -> anyhow::Result<()> {
-        self.ask(|reply| Control::Move { from, to, reply }).await?
+
+    /// Removes a queued item by its id.
+    pub async fn remove(&self, item: u64) -> anyhow::Result<QueueItem> {
+        self.ask(|reply| Control::Remove { item, reply }).await?
+    }
+    /// Removes the item at a 0-based queue position (chat commands).
+    pub async fn remove_at(&self, index: usize) -> anyhow::Result<QueueItem> {
+        let id = self.item_at(index).await?;
+        self.remove(id).await
+    }
+    /// Moves a queued item (by id) to a 0-based position.
+    pub async fn move_item(&self, item: u64, to: usize) -> anyhow::Result<()> {
+        self.ask(|reply| Control::Move { item, to, reply }).await?
+    }
+    /// Plays a queued item (by id) immediately.
+    pub async fn jump(&self, item: u64) -> anyhow::Result<()> {
+        self.ask(|reply| Control::Jump { item, reply }).await?
+    }
+    /// Id of the item at a 0-based queue position.
+    pub async fn item_at(&self, index: usize) -> anyhow::Result<u64> {
+        let queue = self.queue().await?;
+        queue
+            .get(index)
+            .map(|i| i.id)
+            .ok_or_else(|| anyhow!("no queue entry #{}", index + 1))
+    }
+    /// Searches with the search-capable source (yt-dlp) without queueing anything.
+    pub async fn search(&self, query: &str, limit: usize) -> anyhow::Result<Vec<Track>> {
+        let _slot = self.resolve_slot().await?;
+        let registry = self.services.sources.read().clone();
+        registry.search(query, limit).await
     }
     pub async fn status(&self) -> anyhow::Result<InstanceStatus> {
         self.ask(|reply| Control::Status { reply }).await
@@ -267,7 +371,7 @@ impl InstanceHandle {
         self.ask(|reply| Control::Queue { reply }).await
     }
 
-    pub fn shutdown(&self) {
+    pub(crate) fn shutdown(&self) {
         let _ = self.control.send(Control::Shutdown);
     }
 
@@ -277,14 +381,16 @@ impl InstanceHandle {
         make: impl FnOnce(james_core::platform::Reply<T>) -> PlatformCommand,
     ) -> anyhow::Result<T> {
         let (tx, rx) = oneshot::channel();
-        self.platform
-            .send(make(tx))
-            .await
-            .map_err(|_| anyhow!("not connected"))?;
-        tokio::time::timeout(Duration::from_secs(10), rx)
-            .await
-            .context("platform did not answer")?
-            .map_err(|_| anyhow!("connection lost"))?
+        let command = make(tx);
+        tokio::time::timeout(PLATFORM_TIMEOUT, async {
+            self.platform
+                .send(command)
+                .await
+                .map_err(|_| anyhow!("not connected"))?;
+            rx.await.map_err(|_| anyhow!("connection lost"))?
+        })
+        .await
+        .context("the voice server did not answer in time")?
     }
 
     pub async fn snapshot(&self) -> anyhow::Result<Snapshot> {
@@ -319,19 +425,30 @@ impl InstanceHandle {
     }
 }
 
-/// Maximum consecutive tracks that fail to open before playback stops.
+/// Concurrent resolves (URL/search lookups) per instance.
+const RESOLVE_SLOTS: usize = 2;
+/// Maximum queue length per instance (bounds memory per instance).
+pub const MAX_QUEUE: usize = 5000;
+/// Maximum consecutive tracks that fail before playback stops.
 const MAX_CONSECUTIVE_FAILURES: u32 = 5;
+/// Per-client command limits: queued commands, and commands per window.
+const COMMAND_QUEUE: usize = 4;
+const COMMAND_RATE: usize = 8;
+const COMMAND_WINDOW: Duration = Duration::from_secs(10);
+/// A per-client command worker exits after this long without commands.
+const COMMAND_WORKER_IDLE: Duration = Duration::from_secs(60);
 
-pub(crate) fn spawn(config: InstanceConfig, services: Services) -> anyhow::Result<InstanceHandle> {
+pub(crate) fn spawn(
+    config: InstanceConfig,
+    services: Services,
+) -> anyhow::Result<(InstanceHandle, JoinHandle<()>)> {
     let factory = services
         .platforms
         .get(&config.platform)
         .cloned()
         .ok_or_else(|| anyhow!("unknown platform '{}'", config.platform))?;
-    // Validate the settings before spawning anything.
-    let probe = factory.create(&config.settings, None)?;
-    let capabilities = probe.capabilities();
-    drop(probe);
+    factory.validate(&config.settings)?;
+    let capabilities = factory.capabilities();
 
     let (control_tx, control_rx) = mpsc::unbounded_channel();
     let (internal_tx, internal_rx) = mpsc::unbounded_channel();
@@ -344,12 +461,13 @@ pub(crate) fn spawn(config: InstanceConfig, services: Services) -> anyhow::Resul
         .audio
         .bitrate
         .unwrap_or(capabilities.max_bitrate.min(192_000));
-    let engine = AudioEngine::spawn(
+    let engine = services.engines.spawn(
         EngineConfig {
             ffmpeg: services.ffmpeg.clone(),
             target_lufs: config.audio.target_lufs,
             bitrate,
             volume: config.audio.volume,
+            http_proxy: services.http_proxy.clone(),
             ..EngineConfig::default()
         },
         audio_tx,
@@ -358,86 +476,157 @@ pub(crate) fn spawn(config: InstanceConfig, services: Services) -> anyhow::Resul
 
     let handle = InstanceHandle {
         id: config.id.as_str().into(),
+        resolve_slots: Arc::new(tokio::sync::Semaphore::new(RESOLVE_SLOTS)),
+        platform_id: config.platform.as_str().into(),
         control: control_tx,
         platform: platform_tx,
         services: services.clone(),
     };
 
-    // Adapter task with reconnect backoff.
-    let adapter_config = config.clone();
-    let adapter_services = services.clone();
-    let adapter_task = tokio::spawn(async move {
-        let mut ctx = PlatformContext {
-            events: platform_events_tx,
-            commands: platform_rx,
-            audio: audio_rx,
-        };
-        let mut backoff = Duration::from_secs(1);
-        loop {
-            let credentials = adapter_services.store.load_credentials(&adapter_config.id);
-            let started = tokio::time::Instant::now();
-            let result = match factory.create(&adapter_config.settings, credentials) {
-                Ok(mut adapter) => adapter.run(&mut ctx).await,
-                Err(e) => Err(e),
-            };
-            match result {
-                Ok(()) => break,
-                Err(e) => {
-                    if ctx.commands.is_closed() {
-                        break;
-                    }
-                    if started.elapsed() > Duration::from_secs(60) {
-                        backoff = Duration::from_secs(1);
-                    }
-                    tracing::warn!(instance = %adapter_config.id, error = %format!("{e:#}"), retry_in = ?backoff, "platform connection failed");
-                    let _ = ctx.events.send(PlatformEvent::Disconnected {
-                        reason: format!("{e:#}"),
-                    });
-                    tokio::time::sleep(backoff).await;
-                    backoff = (backoff * 2).min(Duration::from_secs(60));
-                }
+    let adapter_task = tokio::spawn(run_adapter(
+        config.id.clone(),
+        config.settings.clone(),
+        factory,
+        services.clone(),
+        {
+            PlatformContext {
+                events: platform_events_tx,
+                commands: platform_rx,
+                audio: audio_rx,
             }
-        }
-    });
+        },
+    ));
 
-    let config_volume = config.audio.volume;
+    let (description_tx, description_rx) = watch::channel(String::new());
+    if config.now_playing_description {
+        tokio::spawn(description_updater(handle.clone(), description_rx));
+    }
+
     let task = InstanceTask {
+        volume: config.audio.volume,
         config,
         services,
         handle: handle.clone(),
         engine,
         player: Player::default(),
         connected: false,
-        volume: config_volume,
         paused: false,
+        generation: 0,
+        playing: None,
+        cache_key: None,
+        last_error: None,
+        open_task: None,
         internal: internal_tx,
         failures: 0,
         adapter_task,
+        description: description_tx,
+        command_workers: HashMap::new(),
+        command_times: HashMap::new(),
     };
-    tokio::spawn(task.run(control_rx, internal_rx, platform_events_rx, engine_events_rx));
-    Ok(handle)
+    let join = tokio::spawn(task.run(control_rx, internal_rx, platform_events_rx, engine_events_rx));
+    Ok((handle, join))
+}
+
+/// Runs the platform adapter, reconnecting with exponential backoff until the instance stops.
+async fn run_adapter(
+    instance: String,
+    settings: serde_json::Value,
+    factory: Arc<dyn james_core::platform::PlatformFactory>,
+    services: Services,
+    mut ctx: PlatformContext,
+) {
+    let mut backoff = Duration::from_secs(1);
+    loop {
+        let credentials = services.store.load_credentials(&instance).await;
+        let started = Instant::now();
+        let result = match factory.create(&settings, credentials) {
+            Ok(mut adapter) => adapter.run(&mut ctx).await,
+            Err(e) => Err(e),
+        };
+        match result {
+            Ok(()) => break,
+            Err(e) => {
+                if ctx.commands.is_closed() {
+                    break;
+                }
+                if started.elapsed() > Duration::from_secs(60) {
+                    backoff = Duration::from_secs(1);
+                }
+                tracing::warn!(%instance, error = %format!("{e:#}"), retry_in = ?backoff, "platform connection failed");
+                let _ = ctx.events.send(PlatformEvent::Disconnected {
+                    reason: format!("{e:#}"),
+                });
+                tokio::time::sleep(backoff).await;
+                backoff = (backoff * 2).min(Duration::from_secs(60));
+            }
+        }
+    }
+}
+
+/// Pushes the latest description to the platform; intermediate values are skipped.
+async fn description_updater(handle: InstanceHandle, mut rx: watch::Receiver<String>) {
+    while rx.changed().await.is_ok() {
+        let text = rx.borrow_and_update().clone();
+        if let Err(e) = handle
+            .platform(|reply| PlatformCommand::SetDescription { text, reply })
+            .await
+        {
+            tracing::debug!(instance = %handle.id(), error = %e, "failed to update description");
+        }
+    }
+}
+
+/// The playback the engine is (or will be) working on.
+#[derive(Debug, Clone, Copy)]
+struct Playing {
+    generation: u64,
+    item: u64,
+    /// The engine reported the first audio frame.
+    audible: bool,
+}
+
+struct CommandJob {
+    mode: MessageTarget,
+    from: Client,
+    text: String,
 }
 
 struct InstanceTask {
     config: InstanceConfig,
     services: Services,
     handle: InstanceHandle,
-    engine: AudioEngine,
+    engine: Box<dyn PlaybackEngine>,
     player: Player,
     connected: bool,
     /// Requested state; the engine applies it asynchronously.
     volume: u8,
     paused: bool,
+    generation: u64,
+    playing: Option<Playing>,
+    /// Last connection error, shown while disconnected.
+    last_error: Option<String>,
+    /// Loudness cache key of the active playback.
+    cache_key: Option<String>,
+    /// The task opening the current track (yt-dlp etc.), aborted when superseded.
+    open_task: Option<tokio::task::AbortHandle>,
     internal: mpsc::UnboundedSender<Internal>,
     failures: u32,
-    adapter_task: tokio::task::JoinHandle<()>,
+    adapter_task: JoinHandle<()>,
+    description: watch::Sender<String>,
+    command_workers: HashMap<String, mpsc::Sender<CommandJob>>,
+    command_times: HashMap<String, VecDeque<Instant>>,
 }
 
 impl InstanceTask {
     fn emit(&self, event: InstanceEvent) {
+        self.emit_with(event, false);
+    }
+
+    fn emit_with(&self, event: InstanceEvent, sensitive: bool) {
         let _ = self.services.events.send(EventEnvelope {
             instance: self.config.id.clone(),
             event,
+            sensitive,
         });
     }
 
@@ -461,31 +650,45 @@ impl InstanceTask {
                 Some(e) = engine.recv() => self.handle_engine(e),
             }
         }
+        self.cancel_open();
         self.engine.stop();
-        // Dropping the handle's platform sender alone is not enough while clones exist.
         let _ = self.handle.platform.try_send(PlatformCommand::Disconnect {
             reason: "shutting down".into(),
         });
-        let _ = tokio::time::timeout(Duration::from_secs(5), &mut self.adapter_task).await;
-        self.adapter_task.abort();
+        if tokio::time::timeout(Duration::from_secs(5), &mut self.adapter_task)
+            .await
+            .is_err()
+        {
+            self.adapter_task.abort();
+        }
         self.emit(InstanceEvent::Stopped);
         tracing::info!(instance = %self.config.id, "instance stopped");
     }
 
     fn status(&self) -> InstanceStatus {
-        let engine = self.engine.status();
+        let audible = self.playing.is_some_and(|p| p.audible);
         InstanceStatus {
             id: self.config.id.clone(),
             name: self.config.name.clone(),
             platform: self.config.platform.clone(),
             connected: self.connected,
             current: self.player.current().cloned(),
-            position_ms: engine.position.as_millis() as u64,
+            loading: self.playing.is_some() && !audible,
+            position_ms: if audible {
+                self.engine.position().as_millis() as u64
+            } else {
+                0
+            },
             paused: self.paused,
             volume: self.volume,
             repeat: self.player.repeat,
             shuffle: self.player.shuffle,
             queue_length: self.player.queue().len(),
+            last_error: if self.connected {
+                None
+            } else {
+                self.last_error.clone()
+            },
         }
     }
 
@@ -498,13 +701,22 @@ impl InstanceTask {
     fn handle_control(&mut self, control: Control) {
         match control {
             Control::Add {
-                tracks,
+                mut tracks,
                 mode,
                 requester,
                 reply,
             } => {
+                let free = MAX_QUEUE.saturating_sub(self.player.queue().len());
+                // In "now" mode the first track does not go into the queue.
+                let allowed = if mode == PlayMode::Now { free + 1 } else { free };
+                tracks.truncate(allowed);
                 if tracks.is_empty() {
-                    let _ = reply.send(Err(anyhow!("nothing to play")));
+                    let error = if allowed == 0 {
+                        anyhow!("the queue is full ({MAX_QUEUE} tracks)")
+                    } else {
+                        anyhow!("nothing to play")
+                    };
+                    let _ = reply.send(Err(error));
                     return;
                 }
                 let idle = self.player.current().is_none();
@@ -521,12 +733,13 @@ impl InstanceTask {
                     PlayMode::Append => self.player.enqueue(tracks, requester),
                 };
                 if idle && mode != PlayMode::Now {
-                    self.next(false);
+                    self.advance(true);
+                } else {
+                    self.emit(InstanceEvent::QueueChanged);
                 }
-                self.emit(InstanceEvent::QueueChanged);
                 let _ = reply.send(Ok(items));
             }
-            Control::Skip => self.next(true),
+            Control::Skip => self.advance(true),
             Control::Previous => {
                 if self.player.previous().is_some() {
                     self.start_current();
@@ -534,10 +747,8 @@ impl InstanceTask {
                 }
             }
             Control::Stop => {
-                self.engine.stop();
                 self.player.stop();
-                self.update_description();
-                self.playback_changed();
+                self.go_idle();
             }
             Control::Pause(paused) => {
                 self.engine.pause(paused);
@@ -550,12 +761,16 @@ impl InstanceTask {
                 self.playback_changed();
             }
             Control::Seek(position) => {
-                self.engine.seek(position);
-                let mut status = self.status();
-                status.position_ms = position.as_millis() as u64;
-                self.emit(InstanceEvent::PlaybackChanged {
-                    status: Box::new(status),
-                });
+                // Seeking only makes sense once the engine plays the track (not while opening).
+                let audible = self.playing.is_some_and(|p| p.audible);
+                if audible && self.player.current().is_some_and(|c| !c.track.is_stream) {
+                    self.engine.seek(position);
+                    let mut status = self.status();
+                    status.position_ms = position.as_millis() as u64;
+                    self.emit(InstanceEvent::PlaybackChanged {
+                        status: Box::new(status),
+                    });
+                }
             }
             Control::Repeat(mode) => {
                 self.player.repeat = mode;
@@ -573,26 +788,35 @@ impl InstanceTask {
                 self.player.clear();
                 self.emit(InstanceEvent::QueueChanged);
             }
-            Control::Remove { index, reply } => {
+            Control::Remove { item, reply } => {
                 let result = self
                     .player
-                    .remove(index)
-                    .ok_or_else(|| anyhow!("no queue entry #{}", index + 1));
+                    .remove(item)
+                    .ok_or_else(|| anyhow!("the track is no longer queued"));
                 if result.is_ok() {
                     self.emit(InstanceEvent::QueueChanged);
                 }
                 let _ = reply.send(result);
             }
-            Control::Move { from, to, reply } => {
-                let moved = self.player.move_item(from, to);
+            Control::Move { item, to, reply } => {
+                let moved = self.player.move_item(item, to);
                 if moved {
                     self.emit(InstanceEvent::QueueChanged);
                 }
                 let _ = reply.send(if moved {
                     Ok(())
                 } else {
-                    Err(anyhow!("invalid queue position"))
+                    Err(anyhow!("the track is no longer queued"))
                 });
+            }
+            Control::Jump { item, reply } => {
+                if self.player.jump(item).is_some() {
+                    self.start_current();
+                    self.emit(InstanceEvent::QueueChanged);
+                    let _ = reply.send(Ok(()));
+                } else {
+                    let _ = reply.send(Err(anyhow!("the track is no longer queued")));
+                }
             }
             Control::Status { reply } => {
                 let _ = reply.send(self.status());
@@ -600,12 +824,22 @@ impl InstanceTask {
             Control::Queue { reply } => {
                 let _ = reply.send(self.player.queue().iter().cloned().collect());
             }
-            Control::Shutdown => unreachable!("handled in run"),
+            // Handled in `run`.
+            Control::Shutdown => {}
         }
     }
 
-    /// Advances to the next track (`skip` ignores repeat-one) and starts it, or goes idle.
-    fn next(&mut self, skip: bool) {
+    /// Stops the engine and publishes the idle state (the player keeps its queue).
+    fn go_idle(&mut self) {
+        self.cancel_open();
+        self.playing = None;
+        self.engine.stop();
+        self.update_description();
+        self.playback_changed();
+    }
+
+    /// Moves to the next track (`skip` ignores repeat-one) and starts it, or goes idle.
+    fn advance(&mut self, skip: bool) {
         let next = if skip {
             self.player.skip()
         } else {
@@ -613,54 +847,80 @@ impl InstanceTask {
         };
         match next {
             Some(_) => self.start_current(),
-            None => {
-                self.engine.stop();
-                self.update_description();
-                self.playback_changed();
-            }
+            None => self.go_idle(),
         }
         self.emit(InstanceEvent::QueueChanged);
     }
 
-    /// Opens the current track asynchronously; playback starts on [`Internal::Opened`].
+    /// Starts a new playback generation for the current item; audio starts on [`Internal::Opened`].
     fn start_current(&mut self) {
         let Some(item) = self.player.current().cloned() else {
             return;
         };
+        self.generation += 1;
+        let generation = self.generation;
+        self.playing = Some(Playing {
+            generation,
+            item: item.id,
+            audible: false,
+        });
+        // Silence the previous track right away instead of letting it run while opening.
+        self.engine.stop();
         if self.paused {
             self.engine.pause(false);
             self.paused = false;
         }
-        let registry = self.services.sources.read().unwrap().clone();
+        self.playback_changed();
+        let registry = self.services.sources.read().clone();
+        let store = self.services.store.clone();
         let internal = self.internal.clone();
-        tokio::spawn(async move {
-            let result = registry.open(&item.track).await;
-            let _ = internal.send(Internal::Opened {
-                item: item.id,
-                result,
-            });
+        // A newer playback supersedes this one: cancel its open (kills yt-dlp via kill_on_drop).
+        self.cancel_open();
+        let task = tokio::spawn(async move {
+            let result = async {
+                let input = registry.open(&item.track).await?;
+                let key = registry.cache_key(&item.track).await;
+                let lufs = match &key {
+                    Some(key) => store.loudness(&item.track.source, key).await,
+                    None => None,
+                };
+                Ok((input, lufs, key))
+            }
+            .await;
+            let _ = internal.send(Internal::Opened { generation, result });
         });
+        self.open_task = Some(task.abort_handle());
+    }
+
+    fn cancel_open(&mut self) {
+        if let Some(task) = self.open_task.take() {
+            task.abort();
+        }
+    }
+
+    /// The current item, if `generation` is the active playback.
+    fn current_item(&self, generation: u64) -> Option<QueueItem> {
+        let playing = self.playing.filter(|p| p.generation == generation)?;
+        self.player.current().filter(|i| i.id == playing.item).cloned()
     }
 
     fn handle_internal(&mut self, internal: Internal) {
         match internal {
-            Internal::Opened { item, result } => {
-                let Some(current) = self.player.current().cloned() else {
+            Internal::Opened { generation, result } => {
+                let Some(item) = self.current_item(generation) else {
                     return;
                 };
-                if current.id != item {
-                    return; // skipped meanwhile
-                }
                 match result {
-                    Ok(input) => {
+                    Ok((input, known_lufs, cache_key)) => {
+                        self.cache_key = cache_key;
                         self.engine.play(PlayRequest {
-                            id: item,
+                            id: generation,
                             input,
                             start: Duration::ZERO,
-                            known_lufs: None,
+                            known_lufs,
                         });
                     }
-                    Err(e) => self.track_failed(current, format!("{e:#}")),
+                    Err(e) => self.track_failed(item, format!("{e:#}")),
                 }
             }
         }
@@ -670,45 +930,52 @@ impl InstanceTask {
         tracing::warn!(instance = %self.config.id, track = %item.track.title, %error, "track failed");
         self.emit(InstanceEvent::TrackEnded {
             item,
-            error: Some(error),
+            error: Some(james_core::text::user_message(&error)),
         });
         self.failures += 1;
         if self.failures >= MAX_CONSECUTIVE_FAILURES {
             tracing::warn!(instance = %self.config.id, "too many consecutive failures, stopping playback");
             self.failures = 0;
-            self.engine.stop();
             self.player.stop();
-            self.update_description();
-            self.playback_changed();
+            self.go_idle();
+            self.emit(InstanceEvent::QueueChanged);
         } else {
-            self.next(true);
+            self.advance(true);
         }
     }
 
     fn handle_engine(&mut self, event: EngineEvent) {
         match event {
             EngineEvent::Started { id } => {
-                if let Some(item) = self.player.current().filter(|i| i.id == id).cloned() {
-                    self.failures = 0;
-                    self.emit(InstanceEvent::TrackStarted { item });
-                    self.update_description();
-                    self.playback_changed();
+                let Some(item) = self.current_item(id) else { return };
+                if let Some(playing) = &mut self.playing {
+                    playing.audible = true;
                 }
+                self.failures = 0;
+                self.emit(InstanceEvent::TrackStarted { item });
+                self.update_description();
+                self.playback_changed();
             }
             EngineEvent::Finished {
-                id, error, stopped, ..
+                id,
+                error,
+                measured_lufs,
+                stopped,
             } => {
                 if stopped {
                     return; // replaced or stopped by us
                 }
-                let Some(item) = self.player.current().filter(|i| i.id == id).cloned() else {
-                    return;
-                };
+                let Some(item) = self.current_item(id) else { return };
                 match error {
                     Some(error) => self.track_failed(item, error),
                     None => {
+                        if let (Some(lufs), Some(key)) = (measured_lufs, self.cache_key.take()) {
+                            let store = self.services.store.clone();
+                            let source = item.track.source.clone();
+                            tokio::spawn(async move { store.save_loudness(&source, &key, lufs).await });
+                        }
                         self.emit(InstanceEvent::TrackEnded { item, error: None });
-                        self.next(false);
+                        self.advance(false);
                     }
                 }
             }
@@ -719,6 +986,7 @@ impl InstanceTask {
         match &event {
             PlatformEvent::Connected { snapshot } => {
                 self.connected = true;
+                self.last_error = None;
                 self.emit(InstanceEvent::Connected {
                     snapshot: snapshot.clone(),
                 });
@@ -726,40 +994,84 @@ impl InstanceTask {
                 return;
             }
             PlatformEvent::Disconnected { reason } => {
-                if self.connected {
-                    self.connected = false;
-                    self.emit(InstanceEvent::Disconnected {
-                        reason: reason.clone(),
-                    });
+                let reason = james_core::text::user_message(reason);
+                let changed = self.connected || self.last_error.as_deref() != Some(reason.as_str());
+                self.connected = false;
+                self.last_error = Some(reason.clone());
+                if changed {
+                    self.emit(InstanceEvent::Disconnected { reason });
+                    self.playback_changed();
                 }
                 return;
             }
             PlatformEvent::CredentialsUpdated { data } => {
-                self.services
-                    .store
-                    .save_credentials(&self.config.id, data.clone());
+                let (store, id, data) = (self.services.store.clone(), self.config.id.clone(), data.clone());
+                tokio::spawn(async move { store.save_credentials(&id, data).await });
                 return;
             }
-            PlatformEvent::Message { mode, from, text }
-                if text.trim_start().starts_with(&self.config.command_prefix) =>
-            {
-                let commands = self.services.commands.clone();
-                let prefix = self.config.command_prefix.clone();
-                let (handle, mode, from, text) = (self.handle.clone(), *mode, from.clone(), text.clone());
-                tokio::spawn(async move {
-                    if let Some(reply) = commands
-                        .dispatch(&prefix, &text, handle.clone(), from.clone(), mode)
-                        .await
-                    {
-                        if let Err(e) = handle.reply(mode, &from, reply).await {
-                            tracing::debug!(error = %e, "failed to send command reply");
-                        }
-                    }
-                });
+            PlatformEvent::Message { mode, from, text } => {
+                let is_command = text.trim_start().starts_with(&self.config.command_prefix);
+                if is_command {
+                    self.queue_command(CommandJob {
+                        mode: *mode,
+                        from: from.clone(),
+                        text: text.clone(),
+                    });
+                }
+                let sensitive = is_command || *mode == MessageTarget::Client;
+                self.emit_with(InstanceEvent::Platform { event }, sensitive);
+                return;
+            }
+            PlatformEvent::Poke { .. } => {
+                self.emit_with(InstanceEvent::Platform { event }, true);
+                return;
             }
             _ => {}
         }
         self.emit(InstanceEvent::Platform { event });
+    }
+
+    /// Runs chat commands of one client in order, with a per-client rate limit.
+    fn queue_command(&mut self, job: CommandJob) {
+        let key = if job.from.uid.is_empty() {
+            job.from.id.clone()
+        } else {
+            job.from.uid.clone()
+        };
+        let now = Instant::now();
+        let times = self.command_times.entry(key.clone()).or_default();
+        while times
+            .front()
+            .is_some_and(|t| now.duration_since(*t) > COMMAND_WINDOW)
+        {
+            times.pop_front();
+        }
+        if times.len() >= COMMAND_RATE {
+            tracing::debug!(instance = %self.config.id, client = %key, "command rate limit hit");
+            return;
+        }
+        times.push_back(now);
+        self.command_times.retain(|_, t| !t.is_empty());
+
+        let job = match self.command_workers.get(&key) {
+            Some(worker) => match worker.try_send(job) {
+                Ok(()) => return,
+                // The client already has a full queue: drop the command.
+                Err(mpsc::error::TrySendError::Full(_)) => return,
+                Err(mpsc::error::TrySendError::Closed(job)) => job,
+            },
+            None => job,
+        };
+        // No live worker for this client: start one.
+        let (tx, rx) = mpsc::channel(COMMAND_QUEUE);
+        let _ = tx.try_send(job);
+        tokio::spawn(command_worker(
+            self.handle.clone(),
+            self.config.command_prefix.clone(),
+            rx,
+        ));
+        self.command_workers.retain(|_, w| !w.is_closed());
+        self.command_workers.insert(key, tx);
     }
 
     fn update_description(&self) {
@@ -767,20 +1079,30 @@ impl InstanceTask {
             return;
         }
         let text = match self.player.current() {
-            Some(item) => match &item.track.artist {
+            // Titles come from websites: neutralise markup (e.g. BBCode images on TeamSpeak).
+            Some(item) => james_core::text::escape_markup(&match &item.track.artist {
                 Some(artist) => format!("♪ {} – {}", artist, item.track.title),
                 None => format!("♪ {}", item.track.title),
-            },
+            }),
             None => String::new(),
         };
-        let handle = self.handle.clone();
-        tokio::spawn(async move {
-            if let Err(e) = handle
-                .platform(|reply| PlatformCommand::SetDescription { text, reply })
-                .await
-            {
-                tracing::debug!(error = %e, "failed to update description");
+        // TeamSpeak limits descriptions; escaping makes brackets longer, so cut afterwards.
+        let text: String = text.chars().take(200).collect();
+        // Always notify (also after reconnects); the updater sends only the latest value.
+        self.description.send_replace(text);
+    }
+}
+
+async fn command_worker(handle: InstanceHandle, prefix: String, mut jobs: mpsc::Receiver<CommandJob>) {
+    while let Ok(Some(job)) = tokio::time::timeout(COMMAND_WORKER_IDLE, jobs.recv()).await {
+        let commands = handle.services().commands.clone();
+        let reply = commands
+            .dispatch(&prefix, &job.text, handle.clone(), job.from.clone(), job.mode)
+            .await;
+        if let Some(reply) = reply {
+            if let Err(e) = handle.reply(job.mode, &job.from, reply).await {
+                tracing::debug!(error = %e, "failed to send command reply");
             }
-        });
+        }
     }
 }

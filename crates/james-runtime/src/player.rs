@@ -14,6 +14,7 @@ pub struct Requester {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
 pub struct QueueItem {
     /// Unique within the instance, stable while the item exists.
     pub id: u64,
@@ -155,18 +156,35 @@ impl Player {
         self.queue.clear();
     }
 
-    /// Removes the queue entry at `index` (0-based).
-    pub fn remove(&mut self, index: usize) -> Option<QueueItem> {
+    /// Position (0-based) of the entry with this id (0-based).
+    fn position(&self, id: u64) -> Option<usize> {
+        self.queue.iter().position(|i| i.id == id)
+    }
+
+    /// Removes the queue entry with the given item id. Ids (unlike positions) stay valid while
+    /// other clients change the queue concurrently.
+    pub fn remove(&mut self, id: u64) -> Option<QueueItem> {
+        let index = self.position(id)?;
         self.queue.remove(index)
     }
 
-    pub fn move_item(&mut self, from: usize, to: usize) -> bool {
-        if from >= self.queue.len() || to >= self.queue.len() {
+    /// Moves the entry with the given id to position `to` (0-based, clamped).
+    pub fn move_item(&mut self, id: u64, to: usize) -> bool {
+        let Some(from) = self.position(id) else {
             return false;
-        }
-        let item = self.queue.remove(from).expect("index checked");
+        };
+        let item = self.queue.remove(from).expect("position exists");
+        let to = to.min(self.queue.len());
         self.queue.insert(to, item);
         true
+    }
+
+    /// Makes a queued entry current immediately (the previous one goes to the history).
+    pub fn jump(&mut self, id: u64) -> Option<QueueItem> {
+        let item = self.remove(id)?;
+        self.retire_current();
+        self.current = Some(item.clone());
+        Some(item)
     }
 
     pub fn shuffle_queue(&mut self) {
@@ -250,11 +268,14 @@ mod tests {
         let mut p = Player::default();
         let items = p.enqueue(vec![track("a"), track("b"), track("c")], None);
         assert_eq!(items.iter().map(|i| i.id).collect::<Vec<_>>(), [1, 2, 3]);
-        assert!(p.move_item(2, 0));
+        assert!(p.move_item(3, 0));
         assert_eq!(titles(&p), ["c", "a", "b"]);
-        assert!(!p.move_item(5, 0));
+        assert!(!p.move_item(99, 0));
         assert_eq!(p.remove(1).unwrap().track.title, "a");
+        assert_eq!(p.jump(2).unwrap().track.title, "b");
+        assert_eq!(p.current().unwrap().track.title, "b");
+        assert_eq!(titles(&p), ["c"]);
         p.shuffle_queue();
-        assert_eq!(p.queue().len(), 2);
+        assert_eq!(p.queue().len(), 1);
     }
 }
