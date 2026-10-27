@@ -129,6 +129,11 @@ pub enum PlatformEvent {
     TalkerCount {
         count: usize,
     },
+    /// Adapter-specific credentials changed and should be persisted (e.g. an
+    /// improved TeamSpeak identity). Passed back to the adapter on the next start.
+    CredentialsUpdated {
+        data: serde_json::Value,
+    },
 }
 
 pub type Reply<T> = oneshot::Sender<anyhow::Result<T>>;
