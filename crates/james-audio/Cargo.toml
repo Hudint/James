@@ -1,0 +1,20 @@
+[package]
+name = "james-audio"
+description = "Real-time audio pipeline of James: decoding, DSP, mixing, Opus encoding"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+james-core.workspace = true
+anyhow.workspace = true
+audiopus = "0.3.0-rc.0"
+bytes = "1"
+ebur128 = "0.1"
+tokio.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+tempfile = "3"
