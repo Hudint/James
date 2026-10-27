@@ -9,6 +9,8 @@ use std::path::{Path, PathBuf};
 
 use figment::providers::{Env, Format, Serialized, Toml};
 use figment::Figment;
+use james_runtime::InstanceConfig;
+use james_sources::ytdlp::YtDlpConfig;
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -18,6 +20,34 @@ pub struct Config {
     pub data_dir: PathBuf,
     pub http: HttpConfig,
     pub log: LogConfig,
+    pub tools: ToolsConfig,
+    pub media: MediaConfig,
+    pub ytdlp: YtDlpConfig,
+    /// Instances defined in the config file (more can be created via the API).
+    pub instances: Vec<InstanceConfig>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct ToolsConfig {
+    pub ffmpeg: String,
+    pub ffprobe: String,
+}
+
+impl Default for ToolsConfig {
+    fn default() -> Self {
+        Self {
+            ffmpeg: "ffmpeg".into(),
+            ffprobe: "ffprobe".into(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct MediaConfig {
+    /// Additional media directories; `<data_dir>/media` is always included.
+    pub dirs: Vec<PathBuf>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -47,6 +77,10 @@ impl Default for Config {
             data_dir: PathBuf::from("data"),
             http: HttpConfig::default(),
             log: LogConfig::default(),
+            tools: ToolsConfig::default(),
+            media: MediaConfig::default(),
+            ytdlp: YtDlpConfig::default(),
+            instances: Vec::new(),
         }
     }
 }
@@ -107,6 +141,32 @@ mod tests {
             assert_eq!(config.data_dir, PathBuf::from("/srv/james"));
             assert_eq!(config.log.format, LogFormat::Json);
             assert_eq!(config.http.bind.port(), 9000);
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn parses_instances() {
+        figment::Jail::expect_with(|jail| {
+            jail.create_file(
+                "james.toml",
+                r#"
+                [[instances]]
+                id = "music"
+                platform = "teamspeak"
+                [instances.settings]
+                address = "ts.example.com"
+                nickname = "DJ"
+                [instances.audio]
+                volume = 30
+                "#,
+            )?;
+            let config = Config::load(Path::new("james.toml")).unwrap();
+            let instance = &config.instances[0];
+            assert_eq!(instance.id, "music");
+            assert_eq!(instance.settings["address"], "ts.example.com");
+            assert_eq!(instance.audio.volume, 30);
+            assert_eq!(instance.command_prefix, "!");
             Ok(())
         });
     }

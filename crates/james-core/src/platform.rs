@@ -209,3 +209,16 @@ pub trait PlatformAdapter: Send {
     /// instance runtime decides about reconnecting).
     async fn run(&mut self, ctx: &mut PlatformContext) -> anyhow::Result<()>;
 }
+
+/// Creates platform adapters from instance settings (one factory per platform).
+pub trait PlatformFactory: Send + Sync {
+    /// Platform id used in instance configs, e.g. `"teamspeak"`.
+    fn id(&self) -> &str;
+    /// Creates an adapter; `credentials` are the last persisted
+    /// [`PlatformEvent::CredentialsUpdated`] data.
+    fn create(
+        &self,
+        settings: &serde_json::Value,
+        credentials: Option<serde_json::Value>,
+    ) -> anyhow::Result<Box<dyn PlatformAdapter>>;
+}

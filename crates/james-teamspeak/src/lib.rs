@@ -13,7 +13,8 @@ use base64::prelude::*;
 use futures::prelude::*;
 use james_core::audio::OpusFrame;
 use james_core::platform::{
-    Capabilities, MessageTarget, PlatformAdapter, PlatformCommand, PlatformContext, PlatformEvent, Reply,
+    Capabilities, MessageTarget, PlatformAdapter, PlatformCommand, PlatformContext, PlatformEvent,
+    PlatformFactory, Reply,
 };
 use serde::{Deserialize, Serialize};
 use tsclientlib::prelude::*;
@@ -76,6 +77,24 @@ impl Default for ClientVersion {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Credentials {
     pub identity: Identity,
+}
+
+pub struct TeamSpeakFactory;
+
+impl PlatformFactory for TeamSpeakFactory {
+    fn id(&self) -> &str {
+        "teamspeak"
+    }
+
+    fn create(
+        &self,
+        settings: &serde_json::Value,
+        credentials: Option<serde_json::Value>,
+    ) -> anyhow::Result<Box<dyn PlatformAdapter>> {
+        let config: TeamSpeakConfig =
+            serde_json::from_value(settings.clone()).context("invalid TeamSpeak settings")?;
+        Ok(Box::new(TeamSpeakAdapter::new(config, credentials)?))
+    }
 }
 
 pub struct TeamSpeakAdapter {
