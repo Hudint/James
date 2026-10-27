@@ -11,10 +11,23 @@ env:
 jobs:
   rust:
     runs-on: ubuntu-latest
+    services:
+      ts3:
+        image: teamspeak:latest
+        env:
+          TS3SERVER_LICENSE: accept
+        ports:
+          - 19987:9987/udp
+      ts6:
+        image: teamspeaksystems/teamspeak6-server:latest
+        env:
+          TSSERVER_LICENSE_ACCEPTED: accept
+        ports:
+          - 29987:9987/udp
     steps:
       - uses: actions/checkout@v4
       - name: Install system dependencies
-        run: sudo apt-get update && sudo apt-get install -y cmake libopus-dev pkg-config
+        run: sudo apt-get update && sudo apt-get install -y cmake libopus-dev pkg-config ffmpeg
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy, rustfmt
@@ -22,3 +35,11 @@ jobs:
       - run: cargo fmt --all --check
       - run: cargo clippy --all-targets --locked -- -D warnings
       - run: cargo test --locked
+      - name: Live test against TeamSpeak 3
+        run: cargo test --locked -p james-teamspeak --test live
+        env:
+          JAMES_TS_TEST_ADDR: localhost:19987
+      - name: Live test against TeamSpeak 6
+        run: cargo test --locked -p james-teamspeak --test live
+        env:
+          JAMES_TS_TEST_ADDR: localhost:29987
