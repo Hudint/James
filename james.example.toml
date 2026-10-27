@@ -1,0 +1,14 @@
+# James configuration. Every key can also be set via environment variables,
+# e.g. JAMES_DATA_DIR=/data or JAMES_HTTP__BIND=0.0.0.0:8087.
+
+# Directory for the database, media library, plugins and caches.
+data_dir = "data"
+
+[http]
+bind = "127.0.0.1:8087"
+
+[log]
+# tracing filter syntax, e.g. "info" or "info,james=debug"
+level = "info"
+# "pretty" or "json"
+format = "pretty"

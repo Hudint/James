@@ -1,0 +1,20 @@
+James Plugin Exception
+======================
+
+Additional permission under section 7 of the GNU Affero General Public License,
+version 3 ("AGPL").
+
+As a special exception, the copyright holders of James give you permission to
+create, use and distribute plugins for James under terms of your choice, without
+those plugins being subject to the terms of the AGPL, provided that:
+
+  1. The plugin interacts with James exclusively through the public plugin API
+     (the `@james/api` package and the documented plugin host interfaces), and
+  2. The plugin does not include or modify any part of James itself other than
+     the MIT-licensed `@james/api` package.
+
+This exception does not affect the licensing of James itself: modified versions
+of James, including versions offered to users over a network, remain subject to
+the AGPL.
+
+SPDX identifier used in this project: LicenseRef-James-Plugin-Exception

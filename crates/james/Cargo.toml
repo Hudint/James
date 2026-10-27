@@ -1,0 +1,20 @@
+[package]
+name = "james"
+description = "James – a voice bot for TeamSpeak and Discord"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+serde.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+figment.workspace = true
+clap.workspace = true
+
+[dev-dependencies]
+figment = { workspace = true, features = ["test"] }
