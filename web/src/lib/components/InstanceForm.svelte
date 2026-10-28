@@ -110,9 +110,13 @@
           }}
         >
           <option value="">{t('config.bitrateAuto')}</option>
-          {#each [64, 96, 128, 160, 192, 256] as kbps (kbps)}
+          {#each [64, 96, 128, 160, 192] as kbps (kbps)}
             <option value={String(kbps)}>{kbps} kbit/s</option>
           {/each}
+          {#if bitrateKbps && ![64, 96, 128, 160, 192].includes(Number(bitrateKbps))}
+            <!-- An older setting: shown as it is, used capped to what the platform takes. -->
+            <option value={bitrateKbps}>{t('config.bitrateUnsupported', { kbps: bitrateKbps })}</option>
+          {/if}
         </select>
       </div>
       <div class="field">

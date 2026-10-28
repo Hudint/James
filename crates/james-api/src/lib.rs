@@ -61,6 +61,19 @@ pub struct AppState {
     pub plugin_tokens: plugin_tokens::PluginTokens,
     /// Single sign-on (`None` when not configured).
     pub oidc: Option<Arc<oidc::Oidc>>,
+    /// The YouTube cookie file managed in the web interface.
+    pub youtube_cookies: Arc<CookieSettings>,
+}
+
+/// Name of the cookie file uploaded in the web interface, in the data directory.
+pub const YOUTUBE_COOKIES_FILE: &str = "youtube-cookies.txt";
+
+/// Where the uploaded YouTube cookies live.
+#[derive(Debug, Clone)]
+pub struct CookieSettings {
+    pub path: PathBuf,
+    /// `ytdlp.cookies` is configured: it takes precedence over the uploaded file.
+    pub configured: bool,
 }
 
 /// Builds the complete application router (API + optional static web UI).

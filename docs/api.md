@@ -27,6 +27,8 @@ searching) are rate-limited per account (`429`).
 | `GET /instances` | `instance.view` | Instances with their status |
 | `POST /instances`, `PUT/DELETE /instances/{id}` | `instance.manage` | Create, change, delete |
 | `POST /instances/{id}/start\|stop\|restart` | `instance.manage` | Connection |
+| `GET /instances/{id}/identity` / `PUT …` `{identity}` | `instance.manage` / administrators | The bot's identity (unique id; never the key) / use an existing one (TeamSpeak `123V…` or base64 key); a running bot reconnects |
+| `GET/PUT/DELETE /settings/youtube-cookies` (`PUT` `{content}`) | administrators | YouTube cookie file (status only, never the content) |
 | `GET /instances/{id}/status` | `instance.view` | Player status (incl. `speech`: texts being spoken or waiting) |
 | `POST /instances/{id}/play` `{input, mode}` | `playback.play` | Play a URL/search/path (`mode`: `now`, `next`, `append`) |
 | `GET /instances/{id}/search?q=&limit=` | `playback.play` | Search (YouTube & co.) |

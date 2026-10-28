@@ -3,6 +3,7 @@ mod instances;
 mod library;
 mod playlists;
 pub(crate) mod plugins;
+mod settings;
 mod tts;
 mod users;
 mod ws;
@@ -31,6 +32,7 @@ pub fn router(state: AppState) -> Router {
         .merge(library::routes())
         .merge(plugins::routes())
         .merge(tts::routes())
+        .merge(settings::routes())
         .merge(ws::routes())
         .route("/health", axum::routing::get(health));
     Router::new()

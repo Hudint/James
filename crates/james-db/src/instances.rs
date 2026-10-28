@@ -55,11 +55,14 @@ impl Db {
     }
 
     pub async fn save_instance_credentials(&self, id: &str, credentials: &serde_json::Value) -> Result<()> {
-        sqlx::query("UPDATE instances SET credentials = ? WHERE id = ?")
+        let updated = sqlx::query("UPDATE instances SET credentials = ? WHERE id = ?")
             .bind(serde_json::to_string(credentials)?)
             .bind(id)
             .execute(self.pool())
             .await?;
+        if updated.rows_affected() == 0 {
+            return Err(DbError::NotFound);
+        }
         Ok(())
     }
 }

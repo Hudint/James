@@ -86,7 +86,8 @@ log and choose a user name and password. The token works once and is not needed 
   channel password
 
 Save and start the instance. The bot joins the server; its TeamSpeak identity is created on the
-first start and kept in `data/`.
+first start. To keep the server groups of an existing bot (e.g. from SinusBot), paste its identity
+under **Settings → Identity** of the instance.
 
 **5. Play something.** Paste a YouTube link into *Add music*, or write to the bot in TeamSpeak:
 
@@ -111,7 +112,6 @@ path in upper case, with `__` between levels. Lists are written as JSON.
 | Host names of the web interface | `JAMES_HTTP__ALLOWED_HOSTS` | `'["james.example.com"]'` |
 | Secure cookies (behind HTTPS) | `JAMES_HTTP__SECURE_COOKIES` | `"true"` |
 | Trusted reverse proxies | `JAMES_HTTP__TRUSTED_PROXIES` | `'["172.18.0.1"]'` |
-| YouTube cookies | `JAMES_YTDLP__COOKIES` | `/data/youtube-cookies.txt` |
 | Proxy for YouTube & co. | `JAMES_YTDLP__PROXY` | `socks5://host:1080` (credentials better in `james.toml`) |
 | Default voice | `JAMES_TTS__DEFAULT_VOICE` | `en_US-lessac-medium` |
 | Log level | `JAMES_LOG__LEVEL` | `info,james_teamspeak=debug` |
@@ -122,9 +122,6 @@ The same settings in `data/james.toml`:
 [http]
 allowed_hosts = ["james.example.com"]
 secure_cookies = true
-
-[ytdlp]
-cookies = "/data/youtube-cookies.txt"
 
 [tts]
 default_voice = "en_US-lessac-medium"
@@ -188,10 +185,10 @@ instead (give it a fixed `ipv4_address`).
 ### YouTube on servers
 
 YouTube often blocks data-centre addresses ("Sign in to confirm you're not a bot"). The PO token
-provider in the compose file is usually enough. If not, export the cookies of a separate YouTube
-account in Netscape format (e.g. with a browser extension), copy it into `data/`
-(`sudo install -o 1001 -g 1001 -m 600 cookies.txt data/youtube-cookies.txt`) and set
-`JAMES_YTDLP__COOKIES=/data/youtube-cookies.txt`. The file grants access to that account, so keep
+provider in the compose file is often not enough on its own. Then export the cookies of a separate
+YouTube account in Netscape format (e.g. with the browser extension "Get cookies.txt LOCALLY") and
+upload them under **Settings → YouTube cookies** (administrators); they apply from the next track
+on. The file grants access to that account, so keep
 it private. See [Installation](docs/installation.md#youtube-on-server-ips) for more options.
 
 ### More voices

@@ -8,7 +8,7 @@ use parking_lot::Mutex;
 #[async_trait]
 pub trait InstanceStore: Send + Sync {
     async fn load_credentials(&self, instance: &str) -> Option<serde_json::Value>;
-    async fn save_credentials(&self, instance: &str, data: serde_json::Value);
+    async fn save_credentials(&self, instance: &str, data: serde_json::Value) -> anyhow::Result<()>;
     /// Cached integrated loudness of a track (LUFS).
     async fn loudness(&self, source: &str, locator: &str) -> Option<f32>;
     async fn save_loudness(&self, source: &str, locator: &str, lufs: f32);
@@ -26,8 +26,9 @@ impl InstanceStore for MemoryStore {
     async fn load_credentials(&self, instance: &str) -> Option<serde_json::Value> {
         self.credentials.lock().get(instance).cloned()
     }
-    async fn save_credentials(&self, instance: &str, data: serde_json::Value) {
+    async fn save_credentials(&self, instance: &str, data: serde_json::Value) -> anyhow::Result<()> {
         self.credentials.lock().insert(instance.to_owned(), data);
+        Ok(())
     }
     async fn loudness(&self, source: &str, locator: &str) -> Option<f32> {
         self.loudness

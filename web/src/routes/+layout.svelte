@@ -81,12 +81,13 @@
     await goto('/login');
   }
 
-  const nav: { href: string; icon: IconName; label: MessageKey; permission?: string }[] = [
+  const nav: { href: string; icon: IconName; label: MessageKey; permission?: string; admin?: boolean }[] = [
     { href: '/', icon: 'dashboard', label: 'nav.dashboard' },
     { href: '/library', icon: 'library', label: 'nav.library', permission: 'library.read' },
     { href: '/playlists', icon: 'list', label: 'nav.playlists', permission: 'playlist.read' },
     { href: '/plugins', icon: 'puzzle', label: 'nav.plugins', permission: 'plugins.manage' },
     { href: '/users', icon: 'users', label: 'nav.users', permission: 'users.manage' },
+    { href: '/settings', icon: 'settings', label: 'nav.settings', admin: true },
   ];
 
   function active(href: string): boolean {
@@ -143,7 +144,7 @@
       <a href="/" class="brand desktop-only"><img src="/favicon.svg" alt="" width="28" height="28" />James</a>
 
       <ul class="nav">
-        {#each nav.filter((n) => !n.permission || can(n.permission)) as item (item.href)}
+        {#each nav.filter((n) => (!n.permission || can(n.permission)) && (!n.admin || session.me?.user.isAdmin)) as item (item.href)}
           <li>
             <a href={item.href} class:active={active(item.href)} aria-current={active(item.href) ? 'page' : undefined}>
               <Icon name={item.icon} />

@@ -19,6 +19,35 @@ use parking_lot::Mutex;
 use serde_json::{json, Value};
 use tower::ServiceExt;
 
+/// A platform whose credentials are `{"key": …}`; only its import is used.
+struct FakePlatform;
+
+impl james_core::platform::PlatformFactory for FakePlatform {
+    fn id(&self) -> &str {
+        "fake"
+    }
+    fn create(
+        &self,
+        _: &Value,
+        _: Option<Value>,
+    ) -> anyhow::Result<Box<dyn james_core::platform::PlatformAdapter>> {
+        anyhow::bail!("not used")
+    }
+    fn validate(&self, _: &Value) -> anyhow::Result<()> {
+        Ok(())
+    }
+    fn capabilities(&self) -> james_core::platform::Capabilities {
+        Default::default()
+    }
+    fn import_credentials(&self, input: &str) -> anyhow::Result<Value> {
+        anyhow::ensure!(input.starts_with("key:"), "not an identity");
+        Ok(json!({ "key": input }))
+    }
+    fn describe_credentials(&self, data: &Value) -> Option<Value> {
+        Some(json!({ "uid": format!("uid-of-{}", data["key"].as_str()?.len()) }))
+    }
+}
+
 struct FakeLibrary {
     dir: PathBuf,
     indexed: Mutex<Vec<PathBuf>>,
@@ -63,7 +92,7 @@ impl Api {
         let db = Db::memory().await.unwrap();
         let services = Services::new(
             SourceRegistry::default(),
-            vec![],
+            vec![Arc::new(FakePlatform)],
             Arc::new(AudioEngineFactory::new(tokio::runtime::Handle::current())),
             Arc::new(MemoryStore::default()),
             "ffmpeg",
@@ -90,6 +119,10 @@ impl Api {
             plugins: None,
             plugin_tokens: Default::default(),
             oidc,
+            youtube_cookies: Arc::new(james_api::CookieSettings {
+                path: dir.path().join("youtube-cookies.txt"),
+                configured: false,
+            }),
         };
         Self {
             app: james_api::router(state),
@@ -735,6 +768,10 @@ async fn unknown_hosts_are_refused_when_configured() {
         plugins: None,
         plugin_tokens: Default::default(),
         oidc: None,
+        youtube_cookies: Arc::new(james_api::CookieSettings {
+            path: "/nonexistent/youtube-cookies.txt".into(),
+            configured: false,
+        }),
     };
     let app = james_api::app(state, None);
     let get = |host: &str| {
@@ -1008,4 +1045,156 @@ async fn sso_failures_redirect_with_fixed_codes() {
     assert_eq!(callback("").await, "/login?error=failed");
     let r = api.call(Method::GET, "/auth/providers", None, None).await;
     assert_eq!(r.body["oidc"]["name"], "SSO");
+}
+
+#[tokio::test]
+async fn identities_are_shown_to_instance_managers_and_replaced_by_admins() {
+    let api = Api::new().await;
+    api.manager
+        .upsert(james_runtime::InstanceConfig {
+            id: "bot".into(),
+            platform: "fake".into(),
+            ..Default::default()
+        })
+        .unwrap();
+    let (_, dj) = api
+        .user_with_grants("dj", &[Grant::global("playback.play")])
+        .await;
+    let (_, manager) = api
+        .user_with_grants("mgr", &[Grant::global("instance.manage")])
+        .await;
+    api.db
+        .create_user("root", Some("root-password"), true)
+        .await
+        .unwrap();
+    let admin = api.login("root", "root-password").await;
+    let path = "/instances/bot/identity";
+    let r = api.call(Method::GET, path, Some(&dj), None).await;
+    assert_eq!(r.status, StatusCode::FORBIDDEN);
+    let r = api
+        .call(
+            Method::PUT,
+            path,
+            Some(&dj),
+            Some(json!({"identity": "key:secret"})),
+        )
+        .await;
+    assert_eq!(r.status, StatusCode::FORBIDDEN);
+
+    let r = api.call(Method::GET, path, Some(&manager), None).await;
+    assert_eq!(
+        (r.status, r.body),
+        (StatusCode::OK, json!({"identity": null})),
+        "none until the first connection"
+    );
+    let r = api
+        .call(
+            Method::PUT,
+            path,
+            Some(&manager),
+            Some(json!({"identity": "key:secret"})),
+        )
+        .await;
+    assert_eq!(
+        r.status,
+        StatusCode::FORBIDDEN,
+        "replacing the identity is for administrators"
+    );
+    let r = api
+        .call(
+            Method::PUT,
+            path,
+            Some(&admin),
+            Some(json!({"identity": "garbage"})),
+        )
+        .await;
+    assert_eq!(r.status, StatusCode::UNPROCESSABLE_ENTITY, "{}", r.body);
+    let r = api
+        .call(
+            Method::PUT,
+            path,
+            Some(&admin),
+            Some(json!({"identity": "key:secret"})),
+        )
+        .await;
+    assert_eq!(r.status, StatusCode::OK, "{}", r.body);
+    assert_eq!(r.body, json!({"identity": {"uid": "uid-of-10"}}));
+    let r = api.call(Method::GET, path, Some(&manager), None).await;
+    assert_eq!(r.body["identity"]["uid"], "uid-of-10");
+    assert!(
+        !r.body.to_string().contains("secret"),
+        "the key is never returned"
+    );
+
+    let r = api
+        .call(Method::GET, "/instances/nope/identity", Some(&manager), None)
+        .await;
+    assert_eq!(r.status, StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn youtube_cookies_are_managed_by_administrators() {
+    let api = Api::new().await;
+    api.db
+        .create_user("root", Some("root-password"), true)
+        .await
+        .unwrap();
+    let admin = api.login("root", "root-password").await;
+    let (_, manager) = api.user_with_grants("mgr", &[Grant::global("*")]).await;
+    let path = "/settings/youtube-cookies";
+    let file = ".youtube.com\tTRUE\t/\tTRUE\t1893456000\tSID\tsecret-value\n\
+                other.example\tFALSE\t/\tFALSE\t0\tsession\tunrelated\n";
+
+    let r = api.call(Method::GET, path, Some(&manager), None).await;
+    assert_eq!(
+        r.status,
+        StatusCode::FORBIDDEN,
+        "all permissions, but not an administrator"
+    );
+    let r = api
+        .call(Method::PUT, path, Some(&manager), Some(json!({"content": file})))
+        .await;
+    assert_eq!(r.status, StatusCode::FORBIDDEN);
+
+    let r = api.call(Method::GET, path, Some(&admin), None).await;
+    assert_eq!(r.body, json!({"configured": false, "uploaded": null}));
+    let r = api
+        .call(
+            Method::PUT,
+            path,
+            Some(&admin),
+            Some(json!({"content": "SID=abc"})),
+        )
+        .await;
+    assert_eq!(r.status, StatusCode::BAD_REQUEST);
+    let r = api
+        .call(Method::PUT, path, Some(&admin), Some(json!({"content": file})))
+        .await;
+    assert_eq!(r.status, StatusCode::OK, "{}", r.body);
+
+    assert_eq!(r.body, json!({"cookies": 1, "dropped": 1}));
+    let stored = api._dir.path().join("youtube-cookies.txt");
+    assert_eq!(
+        std::fs::read_to_string(&stored).unwrap(),
+        "# Netscape HTTP Cookie File\n.youtube.com\tTRUE\t/\tTRUE\t1893456000\tSID\tsecret-value\n",
+        "only YouTube cookies, with the header yt-dlp requires"
+    );
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        assert_eq!(
+            std::fs::metadata(&stored).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+    }
+    let r = api.call(Method::GET, path, Some(&admin), None).await;
+    assert_eq!(r.body["uploaded"]["cookies"], 1);
+    assert!(
+        !r.body.to_string().contains("secret-value"),
+        "the content is never returned"
+    );
+
+    let r = api.call(Method::DELETE, path, Some(&admin), None).await;
+    assert_eq!(r.status, StatusCode::NO_CONTENT);
+    assert!(!stored.exists());
 }

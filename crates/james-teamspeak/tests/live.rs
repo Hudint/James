@@ -157,9 +157,15 @@ async fn plays_audio_and_chats() {
     // Audio: play a 3 s sine through the engine.
     let dir = tempfile::tempdir().unwrap();
     let (engine_events_tx, mut engine_events) = mpsc::unbounded_channel();
+    // At the platform's highest bitrate: every frame must fit into a voice packet
+    // (oversized ones are dropped on the way, which sounds like stutter or silence).
+    let capabilities =
+        james_core::platform::PlatformFactory::capabilities(&james_teamspeak::TeamSpeakFactory);
     let engine = AudioEngine::spawn(
         EngineConfig {
             volume: 100,
+            bitrate: capabilities.max_bitrate,
+            max_frame_bytes: capabilities.max_frame_bytes.unwrap(),
             ..Default::default()
         },
         audio_tx,
@@ -252,6 +258,56 @@ async fn plays_audio_and_chats() {
     assert!(peak > 0.05, "peak {peak} too quiet");
     let rms = (steady.iter().map(|s| s * s).sum::<f32>() / steady.len() as f32).sqrt();
     eprintln!("received {packets} packets, {frequency:.1} Hz, peak {peak:.3}, rms {rms:.3}");
+
+    // Broadband noise (the hardest signal for the encoder) at the same bitrate.
+    let noise = dir.path().join("noise.flac");
+    let status = std::process::Command::new("ffmpeg")
+        .args(["-hide_banner", "-loglevel", "error", "-f", "lavfi", "-i"])
+        .arg("anoisesrc=color=white:duration=3:amplitude=0.5,aformat=channel_layouts=stereo")
+        .arg(&noise)
+        .status()
+        .unwrap();
+    assert!(status.success());
+    engine.play(PlayRequest {
+        id: 2,
+        input: MediaInput::File(noise),
+        start: Duration::ZERO,
+        known_lufs: None,
+    });
+    let (mut noise_packets, mut largest) = (0usize, 0usize);
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    let mut finished_at = None;
+    loop {
+        let wait = finished_at.unwrap_or(deadline);
+        let mut listener_events = listener.events();
+        tokio::select! {
+            item = listener_events.next() => {
+                if let Some(Ok(StreamItem::Audio(packet))) = item {
+                    if let AudioData::S2C { data, from, .. } = packet.data().data() {
+                        if *from == bot_ts_id.0 && !data.is_empty() {
+                            noise_packets += 1;
+                            largest = largest.max(data.len());
+                        }
+                    }
+                }
+            }
+            e = engine_events.recv(), if finished_at.is_none() => {
+                if matches!(e, Some(EngineEvent::Finished { id: 2, .. })) {
+                    finished_at = Some(tokio::time::Instant::now() + Duration::from_millis(500));
+                }
+            }
+            _ = tokio::time::sleep_until(wait) => break,
+        }
+    }
+    eprintln!(
+        "noise at {} kbit/s: received {noise_packets} packets, largest {largest} bytes",
+        capabilities.max_bitrate / 1000
+    );
+    assert!(
+        noise_packets >= 145,
+        "expected ~150 noise packets, got {noise_packets}"
+    );
+    assert!(largest <= james_teamspeak::MAX_FRAME_BYTES);
 
     drop(commands);
     let _ = bot.await.unwrap();

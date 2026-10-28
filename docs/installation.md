@@ -51,10 +51,11 @@ proxy's address and configuration examples for Caddy and nginx are in the
 YouTube often blocks datacenter addresses ("Sign in to confirm you're not a bot"). In this order:
 
 1. The PO token provider of the compose file (enabled by default).
-2. Cookies of a YouTube account: export them in Netscape format (e.g. with a browser extension),
-   copy the file into `data/` (`sudo install -o 1001 -g 1001 -m 600 cookies.txt
-   data/youtube-cookies.txt`) and set `JAMES_YTDLP__COOKIES=/data/youtube-cookies.txt`. Use a
-   separate account; the file grants access to it.
+2. Cookies of a YouTube account: export them in Netscape format (e.g. with the browser extension
+   "Get cookies.txt LOCALLY") and upload them under **Settings → YouTube cookies**. Use a
+   separate account; the file grants access to it. (Alternatively set `ytdlp.cookies` to a file
+   path; it takes precedence over the upload.) Only YouTube cookies are kept (and only sent to YouTube), and
+   the account's own pages (history, Watch later, liked videos) cannot be played.
 3. A residential proxy: `JAMES_YTDLP__PROXY=socks5://user:pass@host:1080`.
 
 YouTube changes often and yt-dlp follows quickly. The published image is rebuilt every week with

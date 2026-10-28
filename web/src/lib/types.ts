@@ -46,6 +46,22 @@ export interface QueueItem {
 export type RepeatMode = 'off' | 'one' | 'all';
 export type PlayMode = 'now' | 'next' | 'append';
 
+/** The YouTube cookie file (never its content). */
+export interface CookieStatus {
+  /** `ytdlp.cookies` is set in the configuration and takes precedence. */
+  configured: boolean;
+  uploaded: { cookies: number; changedAt: number | null } | null;
+}
+
+/** What is shown of a bot's identity (never the private key). */
+export interface BotIdentity {
+  /** Unique id as TeamSpeak 3 shows it. */
+  uid: string;
+  /** Unique id as TeamSpeak 6 shows it (SHA-256 of the same key). */
+  uidTs6?: string;
+  securityLevel?: number;
+}
+
 export interface InstanceStatus {
   id: string;
   name: string;

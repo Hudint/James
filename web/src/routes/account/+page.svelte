@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { copyText } from '$lib/clipboard';
   import { onMount } from 'svelte';
   import { api } from '$lib/api';
   import { confirmAction } from '$lib/confirm.svelte';
@@ -71,14 +72,7 @@
     }
   }
 
-  async function copy(text: string) {
-    try {
-      await navigator.clipboard.writeText(text);
-      toast(t('common.copied'), 'success');
-    } catch {
-      // clipboard unavailable (insecure context): the text stays selectable
-    }
-  }
+  const copy = (text: string) => copyText(text);
 
   const date = (secs: number) => new Date(secs * 1000).toLocaleDateString(i18n.locale);
 </script>

@@ -416,3 +416,94 @@ mod speech {
         assert!(error.to_string().contains("no text-to-speech voice"), "{error}");
     }
 }
+
+mod reconfigure {
+    use super::*;
+    use james_runtime::{ConfigureMode, InstanceConfig};
+    use std::sync::Arc;
+
+    async fn configure(h: &Harness, change: impl FnOnce(&mut InstanceConfig)) {
+        let mut config = h.manager.config("test").unwrap();
+        change(&mut config);
+        h.manager
+            .configure(config, ConfigureMode::Update, |_| async { Ok(()) })
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn changes_apply_without_reconnecting_where_possible() {
+        let h = Harness::start().await;
+        assert_eq!(*h.platform.connections.lock(), 1);
+        configure(&h, |c| {
+            c.name = "Renamed".into();
+            c.settings = serde_json::json!({ "nickname": "NewNick" });
+            c.audio.bitrate = Some(96_000);
+            c.audio.target_lufs = -20.0;
+            c.command_prefix = "?".into();
+            c.now_playing_description = false;
+            c.audio.volume = 77;
+        })
+        .await;
+        eventually("nickname changed", || async {
+            h.platform.nicknames.lock().as_slice() == ["NewNick"]
+        })
+        .await;
+        let calls = h.engine.calls.lock().clone();
+        assert!(calls.contains(&Call::Bitrate(96_000)), "{calls:?}");
+        assert!(calls.contains(&Call::TargetLufs(-20)), "{calls:?}");
+        assert!(calls.contains(&Call::Volume(77)), "{calls:?}");
+        assert_eq!(h.handle().status().await.unwrap().volume, 77);
+        assert_eq!(*h.platform.connections.lock(), 1, "no reconnect");
+        assert_eq!(h.handle().status().await.unwrap().name, "Renamed");
+
+        // The description was switched off: it is cleared.
+        eventually("description cleared", || async {
+            h.platform
+                .descriptions
+                .lock()
+                .last()
+                .is_some_and(String::is_empty)
+        })
+        .await;
+
+        // A bitrate above what the platform takes is capped.
+        configure(&h, |c| c.audio.bitrate = Some(256_000)).await;
+        assert!(h.engine.calls.lock().contains(&Call::Bitrate(128_000)));
+    }
+
+    #[tokio::test]
+    async fn an_import_is_not_undone_by_a_late_save_of_the_old_identity() {
+        let store = Arc::new(common::SlowStore {
+            inner: Default::default(),
+            delay: Duration::from_millis(300),
+            saves: Default::default(),
+        });
+        let h = Harness::start_with_store(store.clone()).await;
+        // The connection reports its (old) identity; saving it takes a while.
+        h.inject
+            .send(james_core::platform::PlatformEvent::CredentialsUpdated {
+                data: serde_json::json!({ "key": "old" }),
+            })
+            .unwrap();
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        let info = h.manager.import_credentials("test", "new").await.unwrap();
+        assert_eq!(info, Some(serde_json::json!({ "key": "new" })));
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        assert_eq!(
+            james_runtime::InstanceStore::load_credentials(&*store, "test").await,
+            Some(serde_json::json!({ "key": "new" })),
+            "the old identity must not win"
+        );
+    }
+
+    #[tokio::test]
+    async fn connection_changes_reconnect() {
+        let h = Harness::start().await;
+        configure(&h, |c| {
+            c.settings = serde_json::json!({ "address": "other.example" })
+        })
+        .await;
+        eventually("reconnected", || async { *h.platform.connections.lock() == 2 }).await;
+    }
+}

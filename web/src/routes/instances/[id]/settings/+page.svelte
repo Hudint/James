@@ -4,6 +4,7 @@
   import { api } from '$lib/api';
   import { confirmAction } from '$lib/confirm.svelte';
   import Icon from '$lib/components/Icon.svelte';
+  import IdentityCard from '$lib/components/IdentityCard.svelte';
   import InstanceForm from '$lib/components/InstanceForm.svelte';
   import { t } from '$lib/i18n/index.svelte';
   import { reportError, toast } from '$lib/session.svelte';
@@ -84,6 +85,7 @@
     <p class="error-text" role="alert">{error}</p>
   {:else if config}
     <InstanceForm bind:config isNew={false} {busy} {dirty} onsubmit={save} />
+    {#if config.platform === 'teamspeak'}<IdentityCard {id} />{/if}
     <section class="card danger stack">
       <h2>{t('config.dangerZone')}</h2>
       <p class="muted small">{t('config.deleteHint')}</p>

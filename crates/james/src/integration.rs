@@ -21,10 +21,8 @@ impl InstanceStore for DbStore {
         })
     }
 
-    async fn save_credentials(&self, instance: &str, data: serde_json::Value) {
-        if let Err(e) = self.0.save_instance_credentials(instance, &data).await {
-            tracing::error!(%instance, error = %e, "failed to save credentials");
-        }
+    async fn save_credentials(&self, instance: &str, data: serde_json::Value) -> anyhow::Result<()> {
+        Ok(self.0.save_instance_credentials(instance, &data).await?)
     }
 
     async fn loudness(&self, source: &str, locator: &str) -> Option<f32> {

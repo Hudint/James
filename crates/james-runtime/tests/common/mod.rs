@@ -24,6 +24,9 @@ pub struct PlatformState {
     pub sent: Mutex<Vec<String>>,
     pub descriptions: Mutex<Vec<String>>,
     pub audio_frames: Mutex<usize>,
+    /// Adapters created (= connections).
+    pub connections: Mutex<usize>,
+    pub nicknames: Mutex<Vec<String>>,
     pub inject: Mutex<Option<mpsc::UnboundedReceiver<PlatformEvent>>>,
 }
 
@@ -38,7 +41,19 @@ impl PlatformFactory for FakePlatform {
         _: &serde_json::Value,
         _: Option<serde_json::Value>,
     ) -> anyhow::Result<Box<dyn PlatformAdapter>> {
+        *self.0.connections.lock() += 1;
         Ok(Box::new(FakeAdapter(self.0.clone())))
+    }
+    /// Like TeamSpeak: the nickname changes on the running connection.
+    fn requires_reconnect(&self, old: &serde_json::Value, new: &serde_json::Value) -> bool {
+        let without_nickname = |v: &serde_json::Value| {
+            let mut v = v.clone();
+            if let Some(map) = v.as_object_mut() {
+                map.remove("nickname");
+            }
+            v
+        };
+        without_nickname(old) != without_nickname(new)
     }
     fn validate(&self, _: &serde_json::Value) -> anyhow::Result<()> {
         Ok(())
@@ -46,8 +61,42 @@ impl PlatformFactory for FakePlatform {
     fn capabilities(&self) -> Capabilities {
         Capabilities {
             max_bitrate: 128_000,
+            max_frame_bytes: None,
             ..Default::default()
         }
+    }
+    fn import_credentials(&self, input: &str) -> anyhow::Result<serde_json::Value> {
+        Ok(serde_json::json!({ "key": input }))
+    }
+    fn describe_credentials(&self, data: &serde_json::Value) -> Option<serde_json::Value> {
+        Some(data.clone())
+    }
+}
+
+/// A store whose first credential save takes a while (like a busy database); later ones are
+/// quick, so a slow old save could overtake them.
+pub struct SlowStore {
+    pub inner: james_runtime::MemoryStore,
+    pub delay: Duration,
+    pub saves: std::sync::atomic::AtomicUsize,
+}
+
+#[async_trait]
+impl james_runtime::InstanceStore for SlowStore {
+    async fn load_credentials(&self, instance: &str) -> Option<serde_json::Value> {
+        self.inner.load_credentials(instance).await
+    }
+    async fn save_credentials(&self, instance: &str, data: serde_json::Value) -> anyhow::Result<()> {
+        if self.saves.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 0 {
+            tokio::time::sleep(self.delay).await;
+        }
+        self.inner.save_credentials(instance, data).await
+    }
+    async fn loudness(&self, source: &str, locator: &str) -> Option<f32> {
+        self.inner.loudness(source, locator).await
+    }
+    async fn save_loudness(&self, source: &str, locator: &str, lufs: f32) {
+        self.inner.save_loudness(source, locator, lufs).await
     }
 }
 
@@ -58,6 +107,7 @@ impl PlatformAdapter for FakeAdapter {
     fn capabilities(&self) -> Capabilities {
         Capabilities {
             max_bitrate: 128_000,
+            max_frame_bytes: None,
             ..Default::default()
         }
     }
@@ -75,6 +125,12 @@ impl PlatformAdapter for FakeAdapter {
                 c = ctx.commands.recv() => match c {
                     Some(PlatformCommand::SendMessage { text, reply, .. }) => {
                         self.0.sent.lock().push(text);
+                        let _ = reply.send(Ok(()));
+                    }
+                    Some(PlatformCommand::UpdateSettings { settings, reply }) => {
+                        if let Some(name) = settings.get("nickname").and_then(|n| n.as_str()) {
+                            self.0.nicknames.lock().push(name.to_owned());
+                        }
                         let _ = reply.send(Ok(()));
                     }
                     Some(PlatformCommand::SetDescription { text, reply }) => {
@@ -112,6 +168,8 @@ pub enum Call {
     Seek(Duration),
     Speak(u64),
     StopSpeech,
+    Bitrate(u32),
+    TargetLufs(i32),
 }
 
 #[derive(Default)]
@@ -194,7 +252,12 @@ impl PlaybackEngine for FakeEngine {
     fn seek(&self, position: Duration) {
         self.0.calls.lock().push(Call::Seek(position));
     }
-    fn set_bitrate(&self, _: u32) {}
+    fn set_bitrate(&self, bitrate: u32) {
+        self.0.calls.lock().push(Call::Bitrate(bitrate));
+    }
+    fn set_target_lufs(&self, lufs: f32) {
+        self.0.calls.lock().push(Call::TargetLufs(lufs as i32));
+    }
     fn position(&self) -> Duration {
         Duration::ZERO
     }
@@ -261,6 +324,10 @@ pub struct Harness {
 
 impl Harness {
     pub async fn start() -> Self {
+        Self::start_with_store(Arc::new(MemoryStore::default())).await
+    }
+
+    pub async fn start_with_store(store: Arc<dyn james_runtime::InstanceStore>) -> Self {
         let platform = Arc::new(PlatformState::default());
         let (inject, inject_rx) = mpsc::unbounded_channel();
         *platform.inject.lock() = Some(inject_rx);
@@ -272,7 +339,7 @@ impl Harness {
             sources,
             vec![Arc::new(FakePlatform(platform.clone()))],
             Arc::new(FakeEngineFactory(engine.clone())),
-            Arc::new(MemoryStore::default()),
+            store,
             "ffmpeg",
         );
         james_runtime::builtin::register(&services.commands);

@@ -99,12 +99,15 @@ async fn run(args: Args, config: Config, audio: tokio::runtime::Handle) -> anyho
     );
     sources.register(
         100,
-        Arc::new(YtDlpResolver::new(
-            config.ytdlp.clone(),
-            config.network.clone(),
-            Some(egress.url().to_owned()),
-            work_dir.clone(),
-        )),
+        Arc::new(
+            YtDlpResolver::new(
+                config.ytdlp.clone(),
+                config.network.clone(),
+                Some(egress.url().to_owned()),
+                work_dir.clone(),
+            )
+            .with_uploaded_cookies(config.data_dir.join(james_api::YOUTUBE_COOKIES_FILE)),
+        ),
     );
 
     let mut services = Services::new(
@@ -180,6 +183,10 @@ async fn run(args: Args, config: Config, audio: tokio::runtime::Handle) -> anyho
         plugins,
         plugin_tokens: Default::default(),
         oidc,
+        youtube_cookies: Arc::new(james_api::CookieSettings {
+            path: config.data_dir.join(james_api::YOUTUBE_COOKIES_FILE),
+            configured: config.ytdlp.cookies.is_some(),
+        }),
     };
     let app = james_api::app(state, config.http.web_root.clone());
     if !config.http.bind.ip().is_loopback() && config.http.allowed_hosts.is_empty() {

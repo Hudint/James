@@ -104,8 +104,9 @@ impl PlatformFactory for TeamSpeakFactory {
         if config.address.trim().is_empty() {
             bail!("address must not be empty");
         }
-        if config.nickname.trim().is_empty() || config.nickname.chars().count() > 30 {
-            bail!("nickname must be 1-30 characters");
+        // TeamSpeak's own limits; the name is sent as entered.
+        if config.nickname.trim() != config.nickname || !(3..=30).contains(&config.nickname.chars().count()) {
+            bail!("nickname must be 3-30 characters without spaces at the start or end");
         }
         if let Some(version) = &config.version {
             BASE64_STANDARD
@@ -118,11 +119,72 @@ impl PlatformFactory for TeamSpeakFactory {
     fn capabilities(&self) -> Capabilities {
         capabilities()
     }
+
+    fn requires_reconnect(&self, old: &serde_json::Value, new: &serde_json::Value) -> bool {
+        // Everything but the nickname is part of the connection (the nickname is changed on
+        // the running one).
+        match (parse_settings(old), parse_settings(new)) {
+            (Ok(old), Ok(new)) => {
+                let mut new = new;
+                new.nickname = old.nickname.clone();
+                serde_json::to_value(&old).ok() != serde_json::to_value(&new).ok()
+            }
+            _ => true,
+        }
+    }
+
+    fn import_credentials(&self, input: &str) -> anyhow::Result<serde_json::Value> {
+        Ok(serde_json::to_value(Credentials {
+            identity: import_identity(input)?,
+        })?)
+    }
+
+    fn describe_credentials(&self, data: &serde_json::Value) -> Option<serde_json::Value> {
+        let identity = serde_json::from_value::<Credentials>(data.clone()).ok()?.identity;
+        Some(serde_json::json!({
+            "uid": identity.key().to_pub().get_uid(),
+            "uidTs6": ts6_uid(&identity),
+            "securityLevel": identity.level(),
+        }))
+    }
+}
+
+/// The unique id TeamSpeak 6 shows for an identity: SHA-256 instead of SHA-1 of the public key.
+fn ts6_uid(identity: &Identity) -> String {
+    use sha2::Digest as _;
+    let omega = identity.key().to_pub().to_ts();
+    BASE64_STANDARD.encode(sha2::Sha256::digest(omega.as_bytes()))
+}
+
+/// Security level an imported identity is raised to if it is lower (servers commonly require
+/// 8; raising it keeps the unique id).
+const MIN_SECURITY_LEVEL: u8 = 8;
+
+/// Reads an identity as the TeamSpeak client exports it (`identity="123V…"`, also used by
+/// SinusBot) or as a base64 private key.
+pub fn import_identity(input: &str) -> anyhow::Result<Identity> {
+    // A whole exported identity file (`[Identity]`, `id=…`, `identity="…"`, `nickname=…`) or
+    // just the value.
+    let text = input
+        .lines()
+        .find_map(|line| line.trim().strip_prefix("identity="))
+        .unwrap_or(input)
+        .trim()
+        .trim_matches('"');
+    let mut identity = Identity::new_from_str(text)
+        .map_err(|_| anyhow::anyhow!("not a TeamSpeak identity (expected e.g. 123V… or a base64 key)"))?;
+    if identity.level() < MIN_SECURITY_LEVEL {
+        identity.upgrade_level(MIN_SECURITY_LEVEL);
+    }
+    Ok(identity)
 }
 
 fn parse_settings(settings: &serde_json::Value) -> anyhow::Result<TeamSpeakConfig> {
     serde_json::from_value(settings.clone()).context("invalid TeamSpeak settings")
 }
+
+/// Largest Opus frame that fits into a TeamSpeak voice packet.
+pub const MAX_FRAME_BYTES: usize = 500 - 13 - 3;
 
 fn capabilities() -> Capabilities {
     Capabilities {
@@ -132,7 +194,10 @@ fn capabilities() -> Capabilities {
         channel_groups: true,
         avatars: true,
         video: false,
-        max_bitrate: 256_000,
+        // A voice packet may have at most 500 bytes (13 bytes packet header, 3 bytes voice
+        // header): larger frames never arrive. 192 kbit/s averages 480 bytes per 20 ms frame.
+        max_bitrate: 192_000,
+        max_frame_bytes: Some(MAX_FRAME_BYTES),
     }
 }
 
@@ -363,6 +428,27 @@ impl Session {
 
     fn handle_command(&mut self, con: &mut Connection, command: PlatformCommand) {
         match command {
+            PlatformCommand::UpdateSettings { settings, reply } => {
+                // Only the nickname can change on a running connection.
+                let result = parse_settings(&settings).and_then(|config| {
+                    let state = con.get_state()?;
+                    let current = state.clients.get(&state.own_client).map(|c| c.name.as_str());
+                    Ok((current != Some(config.nickname.as_str())).then(|| {
+                        let mut update = state.client_update();
+                        update.name = Some(config.nickname.as_str().into());
+                        update.to_packet()
+                    }))
+                });
+                match result {
+                    Ok(Some(packet)) => self.send(con, Ok(packet), reply),
+                    Ok(None) => {
+                        let _ = reply.send(Ok(()));
+                    }
+                    Err(e) => {
+                        let _ = reply.send(Err(e));
+                    }
+                }
+            }
             PlatformCommand::Snapshot { reply } => {
                 let _ = reply.send(con.get_state().map(snapshot).map_err(Into::into));
             }
@@ -697,4 +783,69 @@ fn parse_group(id: &str) -> anyhow::Result<ServerGroupId> {
         id.parse()
             .with_context(|| format!("invalid server group id {id}"))?,
     ))
+}
+
+#[cfg(test)]
+mod identity_import_tests {
+    use super::*;
+
+    const KEY: &str = "MG8DAgeAAgEgAiEA6rtKxDn/o/Bo50rNtAE5Ph3h2RKLHQ0gbFkvm2yA79kCIQCrfzAZts/\
+                       vHP+3MOetKLjNnpZXt4c6U3UB4gWLKR4H9AIgYTyJofmztcTBjq3KZcDdxu+G4RPVwE5vg8VaN2jbQao=";
+    const UID: &str = "test/9PZ9vww/Bpf5vJxtJhpz80=";
+
+    #[test]
+    fn identities_are_imported_from_the_usual_formats() {
+        let from_key = import_identity(KEY).unwrap();
+        assert_eq!(from_key.key().to_pub().get_uid(), UID);
+        assert!(from_key.level() >= MIN_SECURITY_LEVEL, "raised to a usable level");
+
+        // As the TeamSpeak client exports it (counter, `V`, obfuscated key), also as file line.
+        let exported = format!("{}V{}", from_key.counter(), from_key.key().to_ts_obfuscated());
+        for input in [
+            exported.clone(),
+            format!("identity=\"{exported}\""),
+            format!("  {exported}\n"),
+            // The file the TeamSpeak client exports.
+            format!("[Identity]\r\nid=James\r\nidentity=\"{exported}\"\r\nnickname=James\r\n"),
+        ] {
+            let identity = import_identity(&input).unwrap();
+            assert_eq!(identity.key().to_pub().get_uid(), UID, "{input}");
+            assert_eq!(identity.counter(), from_key.counter());
+        }
+
+        assert!(import_identity("").is_err());
+        assert!(import_identity("not an identity").is_err());
+    }
+
+    #[test]
+    fn only_the_nickname_changes_without_reconnecting() {
+        let factory = TeamSpeakFactory;
+        let base = serde_json::json!({"address": "ts.example", "nickname": "James"});
+        let renamed = serde_json::json!({"address": "ts.example", "nickname": "Jimmy"});
+        assert!(!factory.requires_reconnect(&base, &renamed));
+        for changed in [
+            serde_json::json!({"address": "other.example", "nickname": "James"}),
+            serde_json::json!({"address": "ts.example", "nickname": "James", "server_password": "x"}),
+            serde_json::json!({"address": "ts.example", "nickname": "James", "channel": "Lobby"}),
+            serde_json::json!({"nonsense": true}),
+        ] {
+            assert!(factory.requires_reconnect(&base, &changed), "{changed}");
+        }
+    }
+
+    #[test]
+    fn credentials_are_described_without_the_key() {
+        let factory = TeamSpeakFactory;
+        let data = factory.import_credentials(KEY).unwrap();
+        let info = factory.describe_credentials(&data).unwrap();
+        assert_eq!(info["uid"], UID);
+        // As the TeamSpeak 6 test server reported it for this identity.
+        assert_eq!(info["uidTs6"], "3WhVP5ZzCWt4hDl4m2UFcqxTCChTs6N+RSpxytZuQeA=");
+        assert!(info["securityLevel"].as_u64().unwrap() >= 8);
+        assert!(
+            !info.to_string().contains("MG8D"),
+            "no private key in the description"
+        );
+        assert!(factory.describe_credentials(&serde_json::json!({})).is_none());
+    }
 }

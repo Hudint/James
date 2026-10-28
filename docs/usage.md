@@ -10,7 +10,11 @@
 - **Playlists** – saved lists; play them on any instance.
 - **Plugins** – enable plugins, grant permissions, choose instances, settings
   ([Plugins](plugins/README.md)).
+- **Instance → Settings** – connection, audio, command prefix, voice, and the bot's **identity**:
+  its unique ID, and an existing identity to use instead (exported from the TeamSpeak client via
+  *Tools → Identities → Export*, or copied from SinusBot), so the bot keeps its server groups.
 - **Users & roles** – accounts, roles and what they may do, per instance if needed.
+- **Settings** (administrators) – YouTube cookies.
 - **Account** – password, linked TeamSpeak identities, API tokens.
 
 ## Chat commands

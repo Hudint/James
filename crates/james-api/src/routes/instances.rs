@@ -12,6 +12,7 @@ use james_runtime::{
     RepeatMode, Requester,
 };
 use serde::{Deserialize, Serialize};
+use serde_json::{json, Value};
 
 use crate::auth::Auth;
 use crate::error::{ApiError, ApiResult};
@@ -24,6 +25,7 @@ pub fn routes() -> Router<AppState> {
         .route("/instances/{id}/start", post(start))
         .route("/instances/{id}/stop", post(stop))
         .route("/instances/{id}/restart", post(restart))
+        .route("/instances/{id}/identity", get(identity).put(import_identity))
         .route("/instances/{id}/status", get(status))
         .route("/instances/{id}/play", post(play))
         .route("/instances/{id}/skip", post(skip))
@@ -211,6 +213,52 @@ async fn restart(State(state): State<AppState>, auth: Auth, Path(id): Path<Strin
     config_of(&state, &id)?;
     state.manager.restart(&id).await?;
     Ok(StatusCode::NO_CONTENT)
+}
+
+/// The bot's identity on its platform (e.g. the TeamSpeak unique id); `null` until it first
+/// connected. Never contains the private key.
+async fn identity(
+    State(state): State<AppState>,
+    auth: Auth,
+    Path(id): Path<String>,
+) -> ApiResult<Json<Value>> {
+    auth.require("instance.manage", Some(&id))?;
+    config_of(&state, &id)?;
+    Ok(Json(
+        json!({ "identity": state.manager.credentials_info(&id).await? }),
+    ))
+}
+
+#[derive(Deserialize)]
+struct IdentityImport {
+    identity: String,
+}
+
+/// Replaces the bot's identity with an existing one (e.g. from the TeamSpeak client or
+/// SinusBot), so it keeps its server groups. A running bot reconnects with it.
+async fn import_identity(
+    State(state): State<AppState>,
+    auth: Auth,
+    Path(id): Path<String>,
+    Json(body): Json<IdentityImport>,
+) -> ApiResult<Json<Value>> {
+    // The old identity (and the server groups it holds) is gone afterwards: administrators only.
+    if !auth.user.is_admin {
+        return Err(ApiError::forbidden());
+    }
+    state.actions.check(auth.user.id)?;
+    config_of(&state, &id)?;
+    let previous = state.manager.credentials_info(&id).await?;
+    let info = state.manager.import_credentials(&id, &body.identity).await?;
+    let uid = |i: &Option<Value>| i.as_ref().and_then(|i| i.get("uid")).cloned();
+    tracing::info!(
+        instance = %id,
+        user = %auth.user.username,
+        previous = ?uid(&previous),
+        new = ?uid(&info),
+        "identity imported"
+    );
+    Ok(Json(json!({ "identity": info })))
 }
 
 /// The running instance, after checking `permission` for it.

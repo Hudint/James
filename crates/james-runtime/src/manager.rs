@@ -129,7 +129,8 @@ impl InstanceManager {
     }
 
     /// Creates or updates an instance atomically with respect to other lifecycle operations:
-    /// validates, runs `persist`, stores the config and (re)starts the instance as needed.
+    /// validates, runs `persist`, stores the config and applies it: on the running instance
+    /// where possible, otherwise by restarting it.
     pub async fn configure<F, Fut>(
         &self,
         config: InstanceConfig,
@@ -152,8 +153,16 @@ impl InstanceManager {
         }
         persist(config.clone()).await?;
         let autostart = config.autostart;
-        self.configs.write().insert(id.clone(), config);
-        let running = self.get(&id).is_some();
+        self.configs.write().insert(id.clone(), config.clone());
+        let running = self.get(&id);
+        // Whatever the running instance can apply itself (name, nickname, audio, prefix, …)
+        // does not cost a reconnect.
+        if let Some(handle) = &running {
+            if handle.reconfigure(config).await.unwrap_or(false) {
+                return Ok(());
+            }
+        }
+        let running = running.is_some();
         if running {
             self.stop_locked(&id).await;
         }
@@ -254,9 +263,11 @@ impl InstanceManager {
         self.stop_locked(id).await;
     }
 
-    async fn stop_locked(&self, id: &str) {
+    /// Stops the instance; `true` if a credential save had to be cancelled (it may still reach
+    /// the store).
+    async fn stop_locked(&self, id: &str) -> bool {
         let Some(running) = self.running.lock().remove(id) else {
-            return;
+            return false;
         };
         running.handle.shutdown();
         let mut task = running.task;
@@ -265,6 +276,8 @@ impl InstanceManager {
             task.abort();
             let _ = task.await;
         }
+        // Old credentials must be stored (or dropped) before anything replaces them.
+        running.handle.finish_credential_saves(STOP_TIMEOUT).await
     }
 
     pub async fn restart(&self, id: &str) -> anyhow::Result<InstanceHandle> {
@@ -272,6 +285,66 @@ impl InstanceManager {
         let _guard = lock.lock().await;
         self.stop_locked(id).await;
         self.start_locked(id)
+    }
+
+    /// What may be shown about an instance's stored credentials (e.g. the TeamSpeak unique id);
+    /// `None` if it has none yet (they are created on the first connection).
+    pub async fn credentials_info(&self, id: &str) -> anyhow::Result<Option<serde_json::Value>> {
+        let factory = self.factory_of(id)?;
+        Ok(self
+            .services
+            .store
+            .load_credentials(id)
+            .await
+            .and_then(|data| factory.describe_credentials(&data)))
+    }
+
+    /// Replaces an instance's credentials with imported ones (e.g. an existing TeamSpeak
+    /// identity). A running instance is stopped first (so it cannot store its old ones again)
+    /// and restarted with them. Returns what [`Self::credentials_info`] shows.
+    pub async fn import_credentials(
+        &self,
+        id: &str,
+        input: &str,
+    ) -> anyhow::Result<Option<serde_json::Value>> {
+        let lock = self.lifecycle_lock(id);
+        let _guard = lock.lock().await;
+        // Under the lock: the instance cannot be reconfigured to another platform meanwhile.
+        let factory = self.factory_of(id)?;
+        let data = factory.import_credentials(input)?;
+        let was_running = self.running.lock().contains_key(id);
+        // A cancelled save of the old credentials could still land after ours.
+        if self.stop_locked(id).await {
+            if was_running {
+                let _ = self.start_locked(id);
+            }
+            anyhow::bail!("the database is busy, please try again");
+        }
+        self.services.store.save_credentials(id, data).await?;
+        if was_running {
+            // Saved either way; a failed start shows in the instance status.
+            if let Err(e) = self.start_locked(id) {
+                tracing::warn!(instance = %id, error = %format!("{e:#}"), "instance could not be started");
+            }
+        }
+        // What is stored now (not what was entered).
+        Ok(self
+            .services
+            .store
+            .load_credentials(id)
+            .await
+            .and_then(|data| factory.describe_credentials(&data)))
+    }
+
+    fn factory_of(&self, id: &str) -> anyhow::Result<Arc<dyn PlatformFactory>> {
+        let config = self
+            .config(id)
+            .ok_or_else(|| anyhow!("unknown instance '{id}'"))?;
+        self.services
+            .platforms
+            .get(&config.platform)
+            .cloned()
+            .ok_or_else(|| anyhow!("unknown platform '{}'", config.platform))
     }
 
     pub async fn start_autostart(&self) {

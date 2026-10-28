@@ -15,6 +15,7 @@ pub trait PlaybackEngine: Send + Sync {
     fn set_volume(&self, volume: u8);
     fn seek(&self, position: Duration);
     fn set_bitrate(&self, bitrate: u32);
+    fn set_target_lufs(&self, lufs: f32);
     fn position(&self) -> Duration;
     /// Queues speech over the music (ducked).
     fn speak(&self, request: SpeechRequest);
@@ -39,6 +40,9 @@ impl PlaybackEngine for AudioEngine {
     }
     fn set_bitrate(&self, bitrate: u32) {
         AudioEngine::set_bitrate(self, bitrate)
+    }
+    fn set_target_lufs(&self, lufs: f32) {
+        AudioEngine::set_target_lufs(self, lufs)
     }
     fn position(&self) -> Duration {
         self.status().position

@@ -96,7 +96,7 @@ impl Default for InstanceConfig {
 #[serde(default, deny_unknown_fields)]
 pub struct AudioSettings {
     pub volume: u8,
-    /// Opus bitrate in bit/s; defaults to the platform maximum (capped at 192 kbit/s).
+    /// Opus bitrate in bit/s; default 128 kbit/s, at most the platform maximum.
     pub bitrate: Option<u32>,
     pub target_lufs: f32,
 }
@@ -244,6 +244,12 @@ enum Control {
     Queue {
         reply: oneshot::Sender<Vec<QueueItem>>,
     },
+    /// Applies a changed configuration to the running instance; answers `false` if it needs
+    /// a restart (new connection).
+    Reconfigure {
+        config: Box<InstanceConfig>,
+        reply: oneshot::Sender<bool>,
+    },
     Shutdown,
 }
 
@@ -263,6 +269,9 @@ enum Internal {
 #[derive(Clone)]
 pub struct InstanceHandle {
     id: Arc<str>,
+    /// Credential saves in progress; the manager waits for them after the instance stopped,
+    /// so a replacement saved afterwards (identity import) is never overwritten.
+    credential_saves: Arc<parking_lot::Mutex<Vec<tokio::task::JoinHandle<()>>>>,
     resolve_slots: Arc<tokio::sync::Semaphore>,
     platform_id: Arc<str>,
     control: mpsc::UnboundedSender<Control>,
@@ -434,6 +443,43 @@ impl InstanceHandle {
         self.ask(|reply| Control::Queue { reply }).await
     }
 
+    /// Waits for (or, after `timeout`, cancels) credential saves still in progress.
+    /// `true` if one had to be cancelled (it may still reach the database).
+    pub(crate) async fn finish_credential_saves(&self, timeout: Duration) -> bool {
+        let saves = std::mem::take(&mut *self.credential_saves.lock());
+        let mut aborted = false;
+        for mut save in saves {
+            if tokio::time::timeout(timeout, &mut save).await.is_err() {
+                save.abort();
+                let _ = save.await;
+                aborted = true;
+            }
+        }
+        aborted
+    }
+
+    /// Shows a message to the users of the web interface.
+    pub(crate) fn notice(&self, source: &str, message: &str) {
+        let _ = self.services.events.send(EventEnvelope {
+            instance: self.id.to_string(),
+            event: InstanceEvent::Notice {
+                source: source.to_owned(),
+                message: message.chars().take(500).collect(),
+            },
+            sensitive: false,
+        });
+    }
+
+    /// Applies a changed configuration without reconnecting where possible; `Ok(false)` if
+    /// the change needs a restart (e.g. another server address).
+    pub(crate) async fn reconfigure(&self, config: InstanceConfig) -> anyhow::Result<bool> {
+        self.ask(|reply| Control::Reconfigure {
+            config: Box::new(config),
+            reply,
+        })
+        .await
+    }
+
     pub(crate) fn shutdown(&self) {
         let _ = self.control.send(Control::Shutdown);
     }
@@ -487,6 +533,9 @@ impl InstanceHandle {
         self.send_message(mode, client, text).await
     }
 }
+
+/// Opus bitrate when an instance sets none.
+const DEFAULT_BITRATE: u32 = 128_000;
 
 /// Speech queued or being synthesized per instance.
 const MAX_PENDING_SPEECH: usize = 16;
@@ -546,15 +595,20 @@ pub(crate) fn spawn(
     let (audio_tx, audio_rx) = mpsc::channel(64);
     let (engine_events_tx, engine_events_rx) = mpsc::unbounded_channel();
 
+    // 128 kbit/s is transparent for music with Opus; more never exceeds what the platform takes.
     let bitrate = config
         .audio
         .bitrate
-        .unwrap_or(capabilities.max_bitrate.min(192_000));
+        .unwrap_or(DEFAULT_BITRATE)
+        .min(capabilities.max_bitrate);
     let engine = services.engines.spawn(
         EngineConfig {
             ffmpeg: services.ffmpeg.clone(),
             target_lufs: config.audio.target_lufs,
             bitrate,
+            max_frame_bytes: capabilities
+                .max_frame_bytes
+                .unwrap_or(james_audio::encoder::MAX_PACKET),
             volume: config.audio.volume,
             http_proxy: services.http_proxy.clone(),
             ..EngineConfig::default()
@@ -564,6 +618,7 @@ pub(crate) fn spawn(
     )?;
 
     let handle = InstanceHandle {
+        credential_saves: Arc::default(),
         id: config.id.as_str().into(),
         resolve_slots: Arc::new(tokio::sync::Semaphore::new(RESOLVE_SLOTS)),
         platform_id: config.platform.as_str().into(),
@@ -572,9 +627,10 @@ pub(crate) fn spawn(
         services: services.clone(),
     };
 
+    let (settings_tx, settings_rx) = watch::channel(config.settings.clone());
     let adapter_task = tokio::spawn(run_adapter(
         config.id.clone(),
-        config.settings.clone(),
+        settings_rx,
         factory,
         services.clone(),
         {
@@ -587,9 +643,10 @@ pub(crate) fn spawn(
     ));
 
     let (description_tx, description_rx) = watch::channel(String::new());
-    if config.now_playing_description {
-        tokio::spawn(description_updater(handle.clone(), description_rx));
-    }
+    // Also when disabled: it can be switched on (and off, clearing it) while running.
+    tokio::spawn(description_updater(handle.clone(), description_rx));
+    // Settings changed while connected (see `reconfigure`) reach the platform in order.
+    tokio::spawn(settings_updater(handle.clone(), settings_tx.subscribe()));
 
     let task = InstanceTask {
         volume: config.audio.volume,
@@ -609,6 +666,7 @@ pub(crate) fn spawn(
         failures: 0,
         adapter_task,
         description: description_tx,
+        settings: settings_tx,
         command_workers: HashMap::new(),
         command_times: HashMap::new(),
         speech: HashMap::new(),
@@ -622,7 +680,7 @@ pub(crate) fn spawn(
 /// Runs the platform adapter, reconnecting with exponential backoff until the instance stops.
 async fn run_adapter(
     instance: String,
-    settings: serde_json::Value,
+    settings: watch::Receiver<serde_json::Value>,
     factory: Arc<dyn james_core::platform::PlatformFactory>,
     services: Services,
     mut ctx: PlatformContext,
@@ -631,7 +689,8 @@ async fn run_adapter(
     loop {
         let credentials = services.store.load_credentials(&instance).await;
         let started = Instant::now();
-        let result = match factory.create(&settings, credentials) {
+        let current = settings.borrow().clone();
+        let result = match factory.create(&current, credentials) {
             Ok(mut adapter) => adapter.run(&mut ctx).await,
             Err(e) => Err(e),
         };
@@ -651,6 +710,22 @@ async fn run_adapter(
                 tokio::time::sleep(backoff).await;
                 backoff = (backoff * 2).min(Duration::from_secs(60));
             }
+        }
+    }
+}
+
+/// Applies changed settings to the running connection (the platform picks what it can change,
+/// e.g. the nickname); only the latest value is sent, failures are shown.
+async fn settings_updater(handle: InstanceHandle, mut rx: watch::Receiver<serde_json::Value>) {
+    while rx.changed().await.is_ok() {
+        let settings = rx.borrow_and_update().clone();
+        if let Err(e) = handle
+            .platform(|reply| PlatformCommand::UpdateSettings { settings, reply })
+            .await
+        {
+            let message = format!("{e:#}");
+            tracing::warn!(instance = %handle.id(), error = %message, "cannot apply the settings");
+            handle.notice("settings", &james_core::text::user_message(&message));
         }
     }
 }
@@ -705,6 +780,8 @@ struct InstanceTask {
     failures: u32,
     adapter_task: JoinHandle<()>,
     description: watch::Sender<String>,
+    /// Platform settings the adapter uses when it (re)connects.
+    settings: watch::Sender<serde_json::Value>,
     command_workers: HashMap<String, mpsc::Sender<CommandJob>>,
     command_times: HashMap<String, VecDeque<Instant>>,
     /// Speech being synthesized, queued or playing: its text and audio file (removed when it
@@ -931,8 +1008,60 @@ impl InstanceTask {
                 reply,
             } => self.say(text, voice, language, reply),
             Control::StopSpeech => self.stop_speech(),
+            Control::Reconfigure { config, reply } => {
+                let _ = reply.send(self.reconfigure(*config));
+            }
             Control::Shutdown => {}
         }
+    }
+
+    /// Applies what can be changed on the running instance; `false` if a restart is needed.
+    fn reconfigure(&mut self, new: InstanceConfig) -> bool {
+        let old = &self.config;
+        let Some(factory) = self.services.platforms.get(&new.platform).cloned() else {
+            return false;
+        };
+        if new.platform != old.platform || factory.requires_reconnect(&old.settings, &new.settings) {
+            return false;
+        }
+        if new.audio.volume != old.audio.volume {
+            self.engine.set_volume(new.audio.volume);
+            self.volume = new.audio.volume;
+        }
+        if new.audio.bitrate != old.audio.bitrate {
+            let cap = factory.capabilities().max_bitrate;
+            self.engine
+                .set_bitrate(new.audio.bitrate.unwrap_or(DEFAULT_BITRATE).min(cap));
+        }
+        if new.audio.target_lufs != old.audio.target_lufs {
+            self.engine.set_target_lufs(new.audio.target_lufs);
+        }
+        if new.command_prefix != old.command_prefix {
+            // Workers parse with the prefix they started with.
+            self.command_workers.clear();
+        }
+        let description = new.now_playing_description != old.now_playing_description;
+        // Reconnects use the new settings (e.g. the nickname); the settings updater applies
+        // them to the running connection.
+        self.settings.send_if_modified(|current| {
+            let changed = *current != new.settings;
+            *current = new.settings.clone();
+            changed
+        });
+        self.config = new;
+        if description {
+            if self.config.now_playing_description {
+                self.update_description();
+            } else {
+                self.description.send_replace(String::new());
+            }
+        }
+        tracing::info!(instance = %self.config.id, "configuration applied without reconnecting");
+        // Other clients refetch (name, audio settings).
+        self.emit(InstanceEvent::PlaybackChanged {
+            status: Box::new(self.status()),
+        });
+        true
     }
 
     /// Stops the engine and publishes the idle state (the player keeps its queue).
@@ -1209,7 +1338,13 @@ impl InstanceTask {
             }
             PlatformEvent::CredentialsUpdated { data } => {
                 let (store, id, data) = (self.services.store.clone(), self.config.id.clone(), data.clone());
-                tokio::spawn(async move { store.save_credentials(&id, data).await });
+                let mut saves = self.handle.credential_saves.lock();
+                saves.retain(|t| !t.is_finished());
+                saves.push(tokio::spawn(async move {
+                    if let Err(e) = store.save_credentials(&id, data).await {
+                        tracing::error!(instance = %id, error = %format!("{e:#}"), "cannot save the credentials");
+                    }
+                }));
                 return;
             }
             PlatformEvent::Message { mode, from, text } => {

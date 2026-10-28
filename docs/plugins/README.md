@@ -353,7 +353,7 @@ the plugin (`fetch` with the `http` permission) and hand it to the page through 
 | `instances` | Start, stop and inspect all instances (also act on instances the plugin is not active on) | James |
 | `users` | Read and manage James accounts, except accounts with administrative permissions; cannot grant such permissions or take over identities linked to other accounts | James |
 | `web` | Web pages, HTTP endpoints and WebSockets | James |
-| `fs` | Read and write all files the bot user can access; without it a plugin can only read its own files and read/write its data directory | process sandbox |
+| `fs` | Read and write all files the bot user can access, including James' database, the bots' identities and the YouTube cookies; without it a plugin can only read its own files and read/write its data directory | process sandbox |
 | `process` | `node:child_process`, `node:cluster`, native addons | process sandbox |
 | `http` | `fetch()`, `WebSocket`, `node:http(s)` | module guard |
 | `net` | `node:net`, `node:tls`, `node:dgram` | module guard |

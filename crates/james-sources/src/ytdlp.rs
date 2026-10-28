@@ -5,7 +5,7 @@
 
 use std::time::Duration;
 
-use anyhow::{anyhow, Context};
+use anyhow::{anyhow, bail, Context};
 use async_trait::async_trait;
 use james_core::source::{is_http_url, strip_scheme, MediaInput, SourceResolver, Track};
 use serde::{Deserialize, Serialize};
@@ -63,6 +63,7 @@ pub struct YtDlpResolver {
     egress_proxy: Option<String>,
     /// Private directory for per-run cookie copies.
     work_dir: PathBuf,
+    uploaded_cookies: Option<PathBuf>,
 }
 
 impl YtDlpResolver {
@@ -82,7 +83,22 @@ impl YtDlpResolver {
             network,
             egress_proxy,
             work_dir,
+            uploaded_cookies: None,
         }
+    }
+
+    /// Cookie file uploaded in the web interface; used when it exists and `cookies` is not
+    /// configured (checked on every run, so uploads apply without a restart).
+    pub fn with_uploaded_cookies(mut self, path: PathBuf) -> Self {
+        self.uploaded_cookies = Some(path);
+        self
+    }
+
+    fn cookie_file(&self) -> Option<PathBuf> {
+        self.config
+            .cookies
+            .clone()
+            .or_else(|| self.uploaded_cookies.clone().filter(|p| p.is_file()))
     }
 
     /// Common arguments; `cookies` is a private copy of the cookie file (see [`cookie_copy`]).
@@ -124,18 +140,36 @@ impl YtDlpResolver {
         self.config.proxy.clone().or_else(|| self.egress_proxy.clone())
     }
 
-    /// Runs yt-dlp with `args` (after the common ones) and returns stdout.
-    async fn run(&self, args: &[String]) -> anyhow::Result<Vec<u8>> {
-        let cookies = cookie_copy(self.config.cookies.as_deref(), &self.work_dir).await?;
+    /// The cookie file for a yt-dlp run on `target`: only for YouTube itself (URLs on YouTube
+    /// hosts and YouTube searches). Other sites never get the account's session, also not
+    /// through redirects to YouTube or embedded YouTube players.
+    fn cookies_for(&self, target: &str) -> Option<PathBuf> {
+        is_youtube_target(target).then(|| self.cookie_file()).flatten()
+    }
+
+    /// Runs yt-dlp on `target` with `args` (after the common ones) and returns stdout.
+    async fn run(&self, target: &str, args: &[String]) -> anyhow::Result<Vec<u8>> {
+        let cookies = cookie_copy(self.cookies_for(target).as_deref(), &self.work_dir).await?;
         let mut cmd = Command::new(&self.config.binary);
         cmd.args(self.base_args(cookies.as_deref().map(TempFile::path)))
-            .args(args);
+            .args(args)
+            .arg("--")
+            .arg(target);
         james_core::process::apply_proxy_env(&mut cmd, self.proxy().as_deref());
         crate::run(cmd, self.timeout()).await
     }
 
     fn timeout(&self) -> Duration {
         Duration::from_secs(self.config.timeout_secs)
+    }
+
+    /// With cookies, YouTube pages of the account itself (history, Watch later, liked videos,
+    /// subscriptions) would show its private data to everybody: refused.
+    fn check_personal(&self, url: &str) -> anyhow::Result<()> {
+        if self.cookie_file().is_some() && is_personal_youtube(url) {
+            bail!("personal YouTube pages (history, Watch later, liked videos, …) cannot be played");
+        }
+        Ok(())
     }
 
     /// Maps user input to a yt-dlp URL/search expression.
@@ -174,12 +208,10 @@ impl SourceResolver for YtDlpResolver {
         }
         let limit = limit.clamp(1, 25);
         let out = self
-            .run(&[
-                "-J".into(),
-                "--flat-playlist".into(),
-                "--".into(),
-                format!("ytsearch{limit}:{query}"),
-            ])
+            .run(
+                &format!("ytsearch{limit}:{query}"),
+                &["-J".into(), "--flat-playlist".into()],
+            )
             .await?;
         Ok(parse_info(&serde_json::from_slice(&out)?))
     }
@@ -188,18 +220,24 @@ impl SourceResolver for YtDlpResolver {
         let mut target = self.target(input);
         if is_http_url(&target) {
             target = self.network.check(&target).await?;
+            self.check_personal(&target)?;
         }
         let out = self
-            .run(&[
-                "-J".into(),
-                "--flat-playlist".into(),
-                "--playlist-end".into(),
-                self.config.playlist_limit.to_string(),
-                "--".into(),
-                target.clone(),
-            ])
+            .run(
+                &target,
+                &[
+                    "-J".into(),
+                    "--flat-playlist".into(),
+                    "--playlist-end".into(),
+                    self.config.playlist_limit.to_string(),
+                ],
+            )
             .await?;
         let info: Value = serde_json::from_slice(&out).context("invalid yt-dlp output")?;
+        // What yt-dlp actually resolved (also after redirects) must not be a personal list.
+        if self.cookies_for(&target).is_some() && is_personal_result(&info) {
+            bail!("personal YouTube pages (history, Watch later, liked videos, …) cannot be played");
+        }
         let tracks = parse_info(&info);
         if tracks.is_empty() {
             return Err(anyhow!("nothing found for '{input}'"));
@@ -213,9 +251,10 @@ impl SourceResolver for YtDlpResolver {
             return Err(anyhow!("invalid locator"));
         }
         let locator = self.network.check(&track.locator).await?;
+        self.check_personal(&locator)?;
         // yt-dlp downloads and pipes the media itself: sites like YouTube only serve streams
         // correctly to it (ranged requests, tokens). Its traffic goes through the proxy.
-        let cookies = cookie_copy(self.config.cookies.as_deref(), &self.work_dir).await?;
+        let cookies = cookie_copy(self.cookies_for(&locator).as_deref(), &self.work_dir).await?;
         let args = self.download_args(cookies.as_deref().map(TempFile::path), &locator);
         Ok(MediaInput::Process {
             program: self.config.binary.clone(),
@@ -287,15 +326,91 @@ pub fn restrict_protocols(format: &str) -> String {
     format!("({format}){PROTOCOL_FILTER}")
 }
 
+/// Hosts that serve YouTube itself.
+const YOUTUBE_HOSTS: &[&str] = &[
+    "youtube.com",
+    "youtu.be",
+    "youtube-nocookie.com",
+    "youtubekids.com",
+];
+
+fn is_youtube_host(url: &url::Url) -> bool {
+    url.host_str()
+        .map(|h| h.trim_end_matches('.').to_ascii_lowercase())
+        .is_some_and(|h| {
+            YOUTUBE_HOSTS
+                .iter()
+                .any(|y| h == *y || h.ends_with(&format!(".{y}")))
+        })
+}
+
+/// A yt-dlp target that is YouTube itself: a URL on a YouTube host or a YouTube search.
+fn is_youtube_target(target: &str) -> bool {
+    target.starts_with("ytsearch") || url::Url::parse(target).is_ok_and(|u| is_youtube_host(&u))
+}
+
+/// Automatic playlists of the signed-in account (Watch later, liked, history, …).
+const PERSONAL_LISTS: &[&str] = &["WL", "LL", "HL", "FL", "LM"];
+
+fn is_personal_list(id: &str) -> bool {
+    let id = id.to_ascii_uppercase();
+    PERSONAL_LISTS.contains(&id.as_str()) || id.starts_with("RDMM") || id.starts_with("FE")
+}
+
+/// A resolved yt-dlp result that is (or belongs to) a personal list or feed.
+fn is_personal_result(info: &Value) -> bool {
+    let personal = |v: &Value| {
+        ["id", "playlist_id"]
+            .iter()
+            .filter_map(|k| v.get(*k).and_then(Value::as_str))
+            .any(is_personal_list)
+            || ["webpage_url", "original_url", "url"]
+                .iter()
+                .filter_map(|k| v.get(*k).and_then(Value::as_str))
+                .any(is_personal_youtube)
+    };
+    let is_playlist = info.get("_type").and_then(Value::as_str) == Some("playlist");
+    (is_playlist && personal(info))
+        || info
+            .get("webpage_url")
+            .and_then(Value::as_str)
+            .is_some_and(is_personal_youtube)
+}
+
+/// Pages of the signed-in YouTube account: feeds and its automatic playlists.
+fn is_personal_youtube(url: &str) -> bool {
+    let Ok(url) = url::Url::parse(url) else {
+        return false;
+    };
+    if !is_youtube_host(&url) {
+        return false;
+    }
+    let path = url.path().to_ascii_lowercase();
+    let path = path.trim_end_matches('/');
+    path == "/feed"
+        || path.starts_with("/feed/")
+        || path.starts_with("/browse/fe")
+        || path.strip_prefix("/browse/vl").is_some_and(is_personal_list)
+        || path == "/library"
+        || path.starts_with("/library/")
+        || path.starts_with("/channel/me")
+        || url
+            .query_pairs()
+            .any(|(k, v)| k == "list" && is_personal_list(&v))
+}
+
 /// A private copy of the cookie file for one yt-dlp run. yt-dlp writes cookies back when it
 /// exits, so concurrent runs on the shared file could corrupt it. Copies live in a private
 /// work directory (0700, cleared at startup) and are deleted when the last handle is dropped.
 async fn cookie_copy(source: Option<&Path>, work_dir: &Path) -> anyhow::Result<Option<Arc<TempFile>>> {
     let Some(source) = source else { return Ok(None) };
     let path = work_dir.join(format!("cookies-{:016x}.txt", rand::random::<u64>()));
-    let content = tokio::fs::read(source)
-        .await
-        .with_context(|| format!("cannot read {}", source.display()))?;
+    let content = match tokio::fs::read(source).await {
+        Ok(content) => content,
+        // Removed meanwhile (cookies deleted in the web interface): run without.
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(e).with_context(|| format!("cannot read {}", source.display())),
+    };
     let mut options = tokio::fs::OpenOptions::new();
     // `create_new` never follows or reuses an existing path.
     options.write(true).create_new(true);
@@ -315,6 +430,62 @@ async fn cookie_copy(source: Option<&Path>, work_dir: &Path) -> anyhow::Result<O
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn personal_youtube_pages_are_recognised() {
+        for url in [
+            "https://www.youtube.com/feed/history",
+            "https://youtube.com/feed/subscriptions",
+            "https://www.youtube.com/playlist?list=WL",
+            "https://music.youtube.com/playlist?list=LM",
+            "https://www.youtube.com/watch?v=abc&list=LL",
+            "https://youtu.be/abc?list=WL",
+            "https://www.youtube-nocookie.com/embed/videoseries?list=HL",
+            "https://www.youtubekids.com/feed/history",
+            "https://WWW.YOUTUBE.COM./feed/history",
+            "https://www.youtube.com/feed",
+            "https://www.youtube.com/browse/FEhistory",
+            "https://music.youtube.com/browse/FEmusic_liked_videos",
+            "https://music.youtube.com/browse/VLLM",
+            "https://music.youtube.com/library/playlists",
+        ] {
+            assert!(is_personal_youtube(url), "{url}");
+        }
+        for url in [
+            "https://www.youtube.com/watch?v=dQw4w9WgXcQ",
+            "https://www.youtube.com/playlist?list=PL1234",
+            "https://example.com/feed/history",
+        ] {
+            assert!(!is_personal_youtube(url), "{url}");
+        }
+    }
+
+    #[test]
+    fn cookies_only_go_to_youtube() {
+        assert!(is_youtube_target("ytsearch1:never gonna"));
+        assert!(is_youtube_target("https://music.youtube.com/watch?v=x"));
+        assert!(is_youtube_target("https://youtu.be/x"));
+        assert!(!is_youtube_target("https://evil.example/redirects-to-youtube"));
+        assert!(!is_youtube_target("https://soundcloud.com/a/b"));
+        assert!(!is_youtube_target("scsearch1:x"));
+        assert!(!is_youtube_target("https://notyoutube.com/watch"));
+    }
+
+    #[test]
+    fn personal_results_are_recognised() {
+        assert!(is_personal_result(
+            &json!({"_type": "playlist", "id": "WL", "entries": []})
+        ));
+        assert!(is_personal_result(
+            &json!({"_type": "playlist", "id": "x", "webpage_url": "https://www.youtube.com/feed/history"})
+        ));
+        assert!(!is_personal_result(
+            &json!({"_type": "playlist", "id": "PL123", "webpage_url": "https://www.youtube.com/playlist?list=PL123"})
+        ));
+        assert!(!is_personal_result(
+            &json!({"id": "dQw4w9WgXcQ", "webpage_url": "https://www.youtube.com/watch?v=dQw4w9WgXcQ"})
+        ));
+    }
 
     #[test]
     fn parses_single_video() {

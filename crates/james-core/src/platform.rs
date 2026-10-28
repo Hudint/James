@@ -25,6 +25,8 @@ pub struct Capabilities {
     pub video: bool,
     /// Maximum Opus bitrate the platform accepts, in bit/s.
     pub max_bitrate: u32,
+    /// Largest encoded audio frame (20 ms) the platform delivers; `None` = no limit.
+    pub max_frame_bytes: Option<usize>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
@@ -430,6 +432,12 @@ pub enum PlatformCommand {
         args: serde_json::Value,
         reply: Reply<serde_json::Value>,
     },
+    /// Changed settings that need no new connection ([`PlatformFactory::requires_reconnect`]
+    /// returned `false`), e.g. a new nickname; the adapter applies what changed.
+    UpdateSettings {
+        settings: serde_json::Value,
+        reply: Reply<()>,
+    },
     Disconnect {
         reason: String,
     },
@@ -469,6 +477,26 @@ pub trait PlatformFactory: Send + Sync {
 
     /// Capabilities of adapters created by this factory.
     fn capabilities(&self) -> Capabilities;
+
+    /// Whether changing the settings from `old` to `new` needs a new connection. Changes that
+    /// do not (the nickname) are applied to the running connection instead.
+    fn requires_reconnect(&self, old: &serde_json::Value, new: &serde_json::Value) -> bool {
+        old != new
+    }
+
+    /// Reads credentials an administrator entered (e.g. an exported TeamSpeak identity) into
+    /// the form [`PlatformFactory::create`] receives.
+    fn import_credentials(&self, input: &str) -> anyhow::Result<serde_json::Value> {
+        let _ = input;
+        anyhow::bail!("this platform has no credentials to import")
+    }
+
+    /// What may be shown about stored credentials (e.g. the identity's public unique id; never
+    /// secrets). `None` if there is nothing to show.
+    fn describe_credentials(&self, data: &serde_json::Value) -> Option<serde_json::Value> {
+        let _ = data;
+        None
+    }
 }
 
 #[cfg(test)]

@@ -51,7 +51,7 @@ complete file.
 | Key | Default | Meaning |
 |---|---|---|
 | `binary` | `yt-dlp` | yt-dlp program |
-| `cookies` | – | Netscape cookie file (see [Installation](installation.md#youtube-on-server-ips)) |
+| `cookies` | – | Netscape cookie file; takes precedence over the cookies uploaded under **Settings** (see [Installation](installation.md#youtube-on-server-ips)) |
 | `proxy` | – | Proxy for YouTube & co., e.g. `socks5://user:pass@host:1080` |
 | `pot_provider` | – | URL of a bgutil PO token provider, e.g. `http://bgutil:4416` |
 | `extra_args` | `[]` | Additional yt-dlp arguments |
@@ -113,6 +113,7 @@ Set in the web interface (**Instance → Settings**) or via the API:
 | Setting | Meaning |
 |---|---|
 | Address, nickname, server/channel password, default channel | TeamSpeak connection (TeamSpeak 3 and 6) |
+| Identity | The bot's TeamSpeak identity: created on the first start, or an existing one imported (keeps its server groups) |
 | Start volume, bitrate, loudness target | Audio: every track is normalised to the loudness target (EBU R128) |
 | Command prefix | Chat command prefix (`!`) |
 | Voice | Voice for text to speech |

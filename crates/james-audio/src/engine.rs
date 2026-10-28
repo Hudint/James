@@ -23,6 +23,8 @@ pub struct EngineConfig {
     pub ceiling_db: f32,
     /// Opus bitrate in bit/s.
     pub bitrate: u32,
+    /// Largest encoded frame the platform delivers (see [`crate::encoder::OpusEncoder::new`]).
+    pub max_frame_bytes: usize,
     /// Initial volume 0–100.
     pub volume: u8,
     /// Egress proxy for network inputs (see `james_sources::egress`).
@@ -36,6 +38,7 @@ impl Default for EngineConfig {
             target_lufs: -18.0,
             ceiling_db: -1.0,
             bitrate: 128_000,
+            max_frame_bytes: crate::encoder::MAX_PACKET,
             volume: 50,
             http_proxy: None,
         }
@@ -103,6 +106,7 @@ enum Command {
     Volume(u8),
     Seek(Duration),
     Bitrate(u32),
+    TargetLufs(f32),
     Speak(SpeechRequest),
     StopSpeech,
 }
@@ -133,7 +137,7 @@ impl AudioEngine {
         audio: mpsc::Sender<OpusFrame>,
         events: mpsc::UnboundedSender<EngineEvent>,
     ) -> anyhow::Result<Self> {
-        let encoder = OpusEncoder::new(config.bitrate)?;
+        let encoder = OpusEncoder::new(config.bitrate, config.max_frame_bytes)?;
         let (commands, rx) = mpsc::unbounded_channel();
         let (status_tx, status) = watch::channel(EngineStatus {
             volume: config.volume,
@@ -190,6 +194,11 @@ impl AudioEngine {
     /// Cancels the playing and all queued speech.
     pub fn stop_speech(&self) {
         let _ = self.commands.send(Command::StopSpeech);
+    }
+
+    /// Loudness target for the next tracks.
+    pub fn set_target_lufs(&self, lufs: f32) {
+        let _ = self.commands.send(Command::TargetLufs(lufs));
     }
 
     pub fn set_bitrate(&self, bitrate: u32) {
@@ -349,6 +358,8 @@ impl EngineTask {
                     tracing::warn!(error = %e, "failed to set bitrate");
                 }
             }
+            // Applies from the next track (the playing one keeps its level).
+            Command::TargetLufs(lufs) => self.config.target_lufs = lufs,
             Command::Speak(request) => {
                 if self.speech_queue.len() >= MAX_SPEECH_QUEUE {
                     if let Some(dropped) = self.speech_queue.pop_front() {
