@@ -7,6 +7,7 @@ mod channel;
 mod convert;
 
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use anyhow::{anyhow, bail, Context};
 use async_trait::async_trait;
@@ -121,12 +122,14 @@ impl PlatformFactory for TeamSpeakFactory {
     }
 
     fn requires_reconnect(&self, old: &serde_json::Value, new: &serde_json::Value) -> bool {
-        // Everything but the nickname is part of the connection (the nickname is changed on
-        // the running one).
+        // Everything but the nickname and the default channel is part of the connection (those
+        // two change on the running one).
         match (parse_settings(old), parse_settings(new)) {
             (Ok(old), Ok(new)) => {
                 let mut new = new;
                 new.nickname = old.nickname.clone();
+                new.channel = old.channel.clone();
+                new.channel_password = old.channel_password.clone();
                 serde_json::to_value(&old).ok() != serde_json::to_value(&new).ok()
             }
             _ => true,
@@ -180,7 +183,17 @@ pub fn import_identity(input: &str) -> anyhow::Result<Identity> {
 }
 
 fn parse_settings(settings: &serde_json::Value) -> anyhow::Result<TeamSpeakConfig> {
-    serde_json::from_value(settings.clone()).context("invalid TeamSpeak settings")
+    let mut config: TeamSpeakConfig =
+        serde_json::from_value(settings.clone()).context("invalid TeamSpeak settings")?;
+    // A blank channel means the server's default channel (as when connecting).
+    let blank = |v: &Option<String>| v.as_deref().is_some_and(|s| s.trim().is_empty());
+    if blank(&config.channel) {
+        config.channel = None;
+    }
+    if blank(&config.channel_password) {
+        config.channel_password = None;
+    }
+    Ok(config)
 }
 
 /// Largest Opus frame that fits into a TeamSpeak voice packet.
@@ -236,10 +249,16 @@ impl TeamSpeakAdapter {
         if let Some(password) = &self.config.server_password {
             options = options.password(password.clone());
         }
-        if let Some(channel) = &self.config.channel {
+        if let Some(channel) = self
+            .config
+            .channel
+            .as_deref()
+            .map(str::trim)
+            .filter(|c| !c.is_empty())
+        {
             options = match channel.parse::<u64>() {
                 Ok(id) => options.channel_id(ChannelId(id)),
-                Err(_) => options.channel(channel.clone()),
+                Err(_) => options.channel(channel.to_owned()),
             };
         }
         if let Some(password) = &self.config.channel_password {
@@ -276,12 +295,16 @@ impl PlatformAdapter for TeamSpeakAdapter {
         self.persist_identity(&con, ctx);
 
         let mut session = Session {
+            config: self.config.clone(),
+            applied_channel: Arc::default(),
             pending: HashMap::new(),
             created: Vec::new(),
             can_send_audio: true,
             reconnecting: false,
             audio_closed: false,
         };
+        // The join of the default channel may have been refused: check and apply.
+        session.reapply(&mut con);
         let result = session.run(&mut con, ctx).await;
         if result.is_err() {
             let _ = con.disconnect(DisconnectOptions::new());
@@ -322,7 +345,16 @@ struct PendingCreate {
     reply: Reply<String>,
 }
 
+/// A default channel and its password, as in the settings.
+type ChannelChoice = (Option<String>, Option<String>);
+
 struct Session {
+    /// The settings wanted (changed by `UpdateSettings`).
+    config: TeamSpeakConfig,
+    /// Default channel and password the bot is known to be in; `None` = unknown (after
+    /// connecting). A move is only recorded once the server accepted it, so a refused one is
+    /// tried again on the next save.
+    applied_channel: Arc<parking_lot::Mutex<Option<ChannelChoice>>>,
     pending: HashMap<MessageHandle, Reply<()>>,
     created: Vec<PendingCreate>,
     can_send_audio: bool,
@@ -394,6 +426,9 @@ impl Session {
                     let _ = ctx.events.send(PlatformEvent::Connected {
                         snapshot: snapshot(state),
                     });
+                    // The library reconnected with the original name and channel (the join may
+                    // also have been refused): apply the current settings again.
+                    self.reapply(con);
                     return;
                 }
                 let converted = events.iter().filter_map(|e| convert::event(state, e)).collect();
@@ -428,27 +463,15 @@ impl Session {
 
     fn handle_command(&mut self, con: &mut Connection, command: PlatformCommand) {
         match command {
-            PlatformCommand::UpdateSettings { settings, reply } => {
-                // Only the nickname can change on a running connection.
-                let result = parse_settings(&settings).and_then(|config| {
-                    let state = con.get_state()?;
-                    let current = state.clients.get(&state.own_client).map(|c| c.name.as_str());
-                    Ok((current != Some(config.nickname.as_str())).then(|| {
-                        let mut update = state.client_update();
-                        update.name = Some(config.nickname.as_str().into());
-                        update.to_packet()
-                    }))
-                });
-                match result {
-                    Ok(Some(packet)) => self.send(con, Ok(packet), reply),
-                    Ok(None) => {
-                        let _ = reply.send(Ok(()));
-                    }
-                    Err(e) => {
-                        let _ = reply.send(Err(e));
-                    }
+            PlatformCommand::UpdateSettings { settings, reply } => match parse_settings(&settings) {
+                Ok(new) => {
+                    self.config = new;
+                    self.apply_live(con, reply);
                 }
-            }
+                Err(e) => {
+                    let _ = reply.send(Err(e));
+                }
+            },
             PlatformCommand::Snapshot { reply } => {
                 let _ = reply.send(con.get_state().map(snapshot).map_err(Into::into));
             }
@@ -740,6 +763,109 @@ impl Session {
         });
     }
 
+    /// Applies the settings after (re)connecting: where the bot ended up is not known yet.
+    fn reapply(&mut self, con: &mut Connection) {
+        *self.applied_channel.lock() = None;
+        let (reply, result) = tokio::sync::oneshot::channel();
+        self.apply_live(con, reply);
+        tokio::spawn(async move {
+            if let Ok(Err(e)) = result.await {
+                tracing::warn!(error = %format!("{e:#}"), "cannot apply the settings after connecting");
+            }
+        });
+    }
+
+    /// Brings the running connection in line with `self.config`: the nickname, and the
+    /// default channel when it changed since the bot last moved there.
+    fn apply_live(&mut self, con: &mut Connection, reply: Reply<()>) {
+        let state = match con.get_state() {
+            Ok(state) => state,
+            Err(e) => {
+                let _ = reply.send(Err(e.into()));
+                return;
+            }
+        };
+        let Some(own) = state.clients.get(&state.own_client) else {
+            let _ = reply.send(Err(anyhow!("own client missing")));
+            return;
+        };
+        let new = &self.config;
+        let mut packets = Vec::new();
+        if own.name != new.nickname {
+            let mut update = state.client_update();
+            update.name = Some(new.nickname.as_str().into());
+            packets.push(update.to_packet());
+        }
+        let wanted = (new.channel.clone(), new.channel_password.clone());
+        let mut channel_error = None;
+        let mut moved_to = None;
+        if self.applied_channel.lock().as_ref() != Some(&wanted) {
+            // No channel set: the server's default channel.
+            let target = match &new.channel {
+                Some(spec) => find_channel(state, spec),
+                None => state
+                    .channels
+                    .values()
+                    .find(|c| c.is_default == Some(true))
+                    .map(|c| c.id),
+            };
+            match target {
+                Some(target) if own.channel == target => *self.applied_channel.lock() = Some(wanted),
+                Some(target) => {
+                    let part = own.client_move(target);
+                    packets.push(match &new.channel_password {
+                        Some(p) => part.set_password(p).to_packet(),
+                        None => part.to_packet(),
+                    });
+                    moved_to = Some(wanted);
+                }
+                None => {
+                    channel_error = Some(anyhow!(
+                        "the channel '{}' does not exist",
+                        new.channel.as_deref().unwrap_or_default()
+                    ));
+                }
+            }
+        }
+        let applied = self.applied_channel.clone();
+        self.send_all(con, packets, reply, move |ok| {
+            if let (true, Some(wanted)) = (ok, moved_to) {
+                *applied.lock() = Some(wanted);
+            }
+            channel_error.map_or(Ok(()), Err)
+        });
+    }
+
+    /// Sends several commands; `reply` gets the first error, or else what `finish` returns
+    /// (it learns whether all succeeded).
+    fn send_all(
+        &mut self,
+        con: &mut Connection,
+        packets: Vec<OutCommand>,
+        reply: Reply<()>,
+        finish: impl FnOnce(bool) -> anyhow::Result<()> + Send + 'static,
+    ) {
+        let mut results = Vec::new();
+        for packet in packets {
+            let (tx, rx) = tokio::sync::oneshot::channel();
+            self.send(con, Ok(packet), tx);
+            results.push(rx);
+        }
+        tokio::spawn(async move {
+            let mut first_error = None;
+            for rx in results {
+                if let Err(e) = rx.await.unwrap_or_else(|_| Err(anyhow!("connection closed"))) {
+                    first_error.get_or_insert(e);
+                }
+            }
+            let finished = finish(first_error.is_none());
+            let _ = reply.send(match first_error {
+                Some(e) => Err(e),
+                None => finished,
+            });
+        });
+    }
+
     fn send(&mut self, con: &mut Connection, packet: anyhow::Result<OutCommand>, reply: Reply<()>) {
         match packet.and_then(|p| p.send_with_result(con).map_err(Into::into)) {
             Ok(handle) => {
@@ -770,6 +896,38 @@ fn parse_client(id: Option<&str>) -> anyhow::Result<ClientId> {
     Ok(ClientId(
         id.parse().with_context(|| format!("invalid client id {id}"))?,
     ))
+}
+
+/// A channel given as id or path (`Lobby/Music`), as in the default channel setting.
+fn find_channel(state: &tsclientlib::data::Connection, spec: &str) -> Option<ChannelId> {
+    find_channel_in(
+        state
+            .channels
+            .values()
+            .map(|c| (c.id.0, c.parent.0, c.name.as_str(), c.order.0)),
+        spec,
+    )
+    .map(ChannelId)
+}
+
+/// [`find_channel`] over `(id, parent, name, order)`; among equal names the first in order wins.
+fn find_channel_in<'a>(channels: impl Iterator<Item = (u64, u64, &'a str, u64)>, spec: &str) -> Option<u64> {
+    let channels: Vec<_> = channels.collect();
+    let spec = spec.trim();
+    if let Ok(id) = spec.parse::<u64>() {
+        return channels.iter().any(|c| c.0 == id).then_some(id);
+    }
+    let mut parent = 0;
+    let mut found = None;
+    for name in spec.split('/').map(str::trim).filter(|n| !n.is_empty()) {
+        let channel = channels
+            .iter()
+            .filter(|c| c.1 == parent && c.2 == name)
+            .min_by_key(|c| (c.3, c.0))?;
+        parent = channel.0;
+        found = Some(channel.0);
+    }
+    found
 }
 
 fn parse_channel(id: &str) -> anyhow::Result<ChannelId> {
@@ -818,15 +976,55 @@ mod identity_import_tests {
     }
 
     #[test]
-    fn only_the_nickname_changes_without_reconnecting() {
+    fn channels_are_found_by_id_or_path() {
+        // (id, parent, name, order)
+        let channels = [
+            (1, 0, "Lobby", 0),
+            (2, 1, "Music", 0),
+            (3, 0, "Music", 1),
+            (4, 0, "Twice", 2),
+            (5, 0, "Twice", 1),
+            (6, 0, "42", 3),
+        ];
+        let find = |spec: &str| find_channel_in(channels.iter().copied(), spec);
+        assert_eq!(find("2"), Some(2));
+        assert_eq!(find("99"), None, "unknown id");
+        assert_eq!(find("Lobby/Music"), Some(2));
+        assert_eq!(
+            find(" /Lobby / Music/ "),
+            Some(2),
+            "spaces and slashes around parts"
+        );
+        assert_eq!(find("Music"), Some(3), "top level");
+        assert_eq!(find("Lobby/Nothing"), None);
+        assert_eq!(find("Twice"), Some(5), "the first in order");
+        assert_eq!(find("42"), None, "a number is an id");
+        assert_eq!(find(""), None);
+        assert_eq!(find(" / "), None);
+    }
+
+    #[test]
+    fn nickname_and_channel_change_without_reconnecting() {
         let factory = TeamSpeakFactory;
         let base = serde_json::json!({"address": "ts.example", "nickname": "James"});
         let renamed = serde_json::json!({"address": "ts.example", "nickname": "Jimmy"});
         assert!(!factory.requires_reconnect(&base, &renamed));
+        let moved =
+            serde_json::json!({"address": "ts.example", "nickname": "James", "channel": "Lobby/Music"});
+        assert!(
+            !factory.requires_reconnect(&base, &moved),
+            "the bot moves instead"
+        );
+        let password =
+            serde_json::json!({"address": "ts.example", "nickname": "James", "channel_password": "x"});
+        assert!(!factory.requires_reconnect(&base, &password));
+        assert!(parse_settings(&serde_json::json!({"channel": "  "}))
+            .unwrap()
+            .channel
+            .is_none());
         for changed in [
             serde_json::json!({"address": "other.example", "nickname": "James"}),
             serde_json::json!({"address": "ts.example", "nickname": "James", "server_password": "x"}),
-            serde_json::json!({"address": "ts.example", "nickname": "James", "channel": "Lobby"}),
             serde_json::json!({"nonsense": true}),
         ] {
             assert!(factory.requires_reconnect(&base, &changed), "{changed}");

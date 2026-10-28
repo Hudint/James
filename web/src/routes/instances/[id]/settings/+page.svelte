@@ -8,7 +8,7 @@
   import InstanceForm from '$lib/components/InstanceForm.svelte';
   import { t } from '$lib/i18n/index.svelte';
   import { reportError, toast } from '$lib/session.svelte';
-  import type { InstanceConfig } from '$lib/types';
+  import type { InstanceConfig, PlatformChannel } from '$lib/types';
 
   let id = $derived(page.params.id ?? '');
   let config = $state<InstanceConfig | null>(null);
@@ -16,6 +16,12 @@
   let dirty = $derived(config !== null && JSON.stringify(config) !== saved);
   let error = $state('');
   let busy = $state(false);
+  /** Channels of the server, while the bot is connected (for the channel choice). */
+  let channels = $state<PlatformChannel[] | null>(null);
+  /** The list is from the server the bot is on: offered only while the address is unchanged. */
+  let sameServer = $derived(
+    config !== null && saved !== '' && JSON.parse(saved).settings?.address === config.settings?.address,
+  );
 
   $effect(() => {
     api
@@ -28,7 +34,20 @@
         else error = t('errors.forbidden');
       })
       .catch((e) => (error = (e as Error).message));
+    void loadChannels();
   });
+
+  /** The server's channels while the bot is connected; answers for another instance are dropped. */
+  let channelRequest = 0;
+  async function loadChannels() {
+    const request = ++channelRequest;
+    const loaded = await api.server(id).then(
+      (snapshot) => snapshot.channels,
+      () => null,
+    );
+    // Only the latest answer counts (also after switching to another instance).
+    if (request === channelRequest) channels = loaded;
+  }
 
   async function save() {
     if (!config) return;
@@ -84,7 +103,7 @@
   {#if error}
     <p class="error-text" role="alert">{error}</p>
   {:else if config}
-    <InstanceForm bind:config isNew={false} {busy} {dirty} onsubmit={save} />
+    <InstanceForm bind:config isNew={false} {busy} {dirty} channels={sameServer ? channels : null} onchannelsneeded={loadChannels} onsubmit={save} />
     {#if config.platform === 'teamspeak'}<IdentityCard {id} />{/if}
     <section class="card danger stack">
       <h2>{t('config.dangerZone')}</h2>

@@ -2,21 +2,72 @@
   import { onMount } from 'svelte';
   import { api } from '$lib/api';
   import { i18n, t } from '$lib/i18n/index.svelte';
-  import type { InstanceConfig, TtsVoice } from '$lib/types';
+  import type { InstanceConfig, PlatformChannel, TtsVoice } from '$lib/types';
 
   let {
     config = $bindable(),
     isNew,
     busy,
     dirty = true,
+    channels = null,
+    onchannelsneeded,
     onsubmit,
-  }: { config: InstanceConfig; isNew: boolean; busy: boolean; dirty?: boolean; onsubmit: () => void } = $props();
+  }: {
+    config: InstanceConfig;
+    isNew: boolean;
+    busy: boolean;
+    dirty?: boolean;
+    /** Channels of the server the bot is connected to (offers a choice instead of typing). */
+    channels?: PlatformChannel[] | null;
+    /** Asks for a fresh channel list (the field got focus). */
+    onchannelsneeded?: () => void;
+    onsubmit: () => void;
+  } = $props();
 
   // TeamSpeak settings are stored as an untyped map; expose them as typed fields.
   const settings = $derived(config.settings as Record<string, string | null | undefined>);
   function setSetting(key: string, value: string) {
     config.settings = { ...config.settings, [key]: value.trim() === '' ? null : value };
   }
+
+  /** TeamSpeak spacers (`[cspacer]---`) are decoration, not channels to join. */
+  const isSpacer = (name: string) => /^\[[lcr*]?spacer[^\]]*\]/i.test(name);
+  /** Channels depth first (by their order) with depth and path (`Lobby/Music`). */
+  let channelTree = $derived.by(() => {
+    const children = new Map<string, PlatformChannel[]>();
+    for (const c of channels ?? []) {
+      const key = c.parent ?? '';
+      children.set(key, [...(children.get(key) ?? []), c]);
+    }
+    const out: { id: string; name: string; depth: number; path: string }[] = [];
+    const walk = (parent: string, depth: number, prefix: string) => {
+      for (const c of (children.get(parent) ?? []).sort((a, b) => a.order - b.order)) {
+        const path = prefix ? `${prefix}/${c.name}` : c.name;
+        // Temporary channels disappear when empty: no use as a default.
+        const temporary = c.permanent === false && c.semiPermanent === false;
+        if (!isSpacer(c.name) && !temporary) out.push({ id: c.id, name: c.name, depth, path });
+        walk(c.id, depth + 1, path);
+      }
+    };
+    walk('', 0, '');
+    return out;
+  });
+  /** The configured channel (id or path) as an id of the list; `null` if not on the server. */
+  let selectedChannel = $derived.by(() => {
+    const value = settings.channel?.trim();
+    if (!value) return '';
+    // Paths are compared like the server resolves them: parts trimmed, outer slashes ignored.
+    const normalized = value
+      .split('/')
+      .map((p) => p.trim())
+      .filter(Boolean)
+      .join('/');
+    const listed = channelTree.find((c) => c.id === value || c.path === normalized);
+    if (listed) return listed.id;
+    // On the server but not offered (temporary or spacer): keep it as it is, not "missing".
+    if ((channels ?? []).some((c) => c.id === value)) return value;
+    return null;
+  });
 
   const idPattern = '[a-z0-9_-]{1,32}';
   let bitrateKbps = $derived(config.audio.bitrate ? String(config.audio.bitrate / 1000) : '');
@@ -82,8 +133,24 @@
       </div>
       <div class="field">
         <label for="cfg-channel">{t('config.channel')} <span class="muted">({t('common.optional')})</span></label>
-        <input id="cfg-channel" type="text" value={settings.channel ?? ''} oninput={(e) => setSetting('channel', e.currentTarget.value)} aria-describedby="cfg-channel-hint" />
-        <span id="cfg-channel-hint" class="hint">{t('config.channelHint')}</span>
+        {#if channels && channels.length}
+          <select id="cfg-channel" value={selectedChannel ?? settings.channel ?? ''} onfocus={() => onchannelsneeded?.()} onchange={(e) => setSetting('channel', e.currentTarget.value)} aria-describedby="cfg-channel-hint">
+            <option value="">{t('config.channelDefault')}</option>
+            {#if selectedChannel !== null && selectedChannel !== '' && !channelTree.some((c) => c.id === selectedChannel)}
+              <option value={selectedChannel}>{(channels ?? []).find((c) => c.id === selectedChannel)?.name ?? selectedChannel}</option>
+            {/if}
+            {#if selectedChannel === null}
+              <option value={settings.channel ?? ''}>{t('config.channelMissing', { channel: settings.channel ?? '' })}</option>
+            {/if}
+            {#each channelTree as channel (channel.id)}
+              <option value={channel.id}>{'\u00a0\u00a0\u00a0'.repeat(channel.depth)}{channel.name}</option>
+            {/each}
+          </select>
+          <span id="cfg-channel-hint" class="hint">{t('config.channelPickHint')}</span>
+        {:else}
+          <input id="cfg-channel" type="text" value={settings.channel ?? ''} onfocus={() => onchannelsneeded?.()} oninput={(e) => setSetting('channel', e.currentTarget.value)} aria-describedby="cfg-channel-hint" />
+          <span id="cfg-channel-hint" class="hint">{t('config.channelHint')}</span>
+        {/if}
       </div>
       <div class="field">
         <label for="cfg-channel-password">{t('config.channelPassword')} <span class="muted">({t('common.optional')})</span></label>

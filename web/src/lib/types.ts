@@ -187,6 +187,9 @@ export interface PlatformChannel {
   id: string;
   parent: string | null;
   name: string;
+  /** Neither flag: a temporary channel (gone when empty). */
+  permanent?: boolean;
+  semiPermanent?: boolean;
   topic: string;
   description: string;
   codecQuality: number | null;

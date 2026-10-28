@@ -1042,12 +1042,9 @@ impl InstanceTask {
         }
         let description = new.now_playing_description != old.now_playing_description;
         // Reconnects use the new settings (e.g. the nickname); the settings updater applies
-        // them to the running connection.
-        self.settings.send_if_modified(|current| {
-            let changed = *current != new.settings;
-            *current = new.settings.clone();
-            changed
-        });
+        // them to the running connection. Also when unchanged: saving again retries what the
+        // platform could not apply (e.g. a channel it was refused).
+        self.settings.send_replace(new.settings.clone());
         self.config = new;
         if description {
             if self.config.now_playing_description {
