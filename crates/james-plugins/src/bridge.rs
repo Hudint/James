@@ -141,6 +141,7 @@ async fn dispatch(ctx: &Ctx<'_>, method: &str, params: Value) -> Result<Value> {
         "users" => users(ctx, method, params).await,
         "commands" => commands(ctx, method, params),
         "web" => web(ctx, method, params),
+        "tts" => tts(ctx, method, params).await,
         "engine" => engine(ctx, method, params).await,
         _ => Err(format!("unknown method '{method}'")),
     }
@@ -1016,6 +1017,37 @@ fn commands(ctx: &Ctx<'_>, method: &str, params: Value) -> Result<Value> {
                 .config(handle.id())
                 .map(|c| c.command_prefix)
                 .unwrap_or_default())
+        }
+        _ => Err(format!("unknown method '{method}'")),
+    }
+}
+
+async fn tts(ctx: &Ctx<'_>, method: &str, params: Value) -> Result<Value> {
+    #[derive(Deserialize)]
+    struct Say {
+        text: String,
+        #[serde(default)]
+        voice: Option<String>,
+        #[serde(default)]
+        language: Option<String>,
+    }
+    match method {
+        "tts.voices" => ok(ctx.manager.instances.services().tts.read().voices()),
+        "tts.say" => {
+            let Say {
+                text,
+                voice,
+                language,
+            } = args(params)?;
+            let handle = ctx.instance()?;
+            ok(handle
+                .say(&text, voice.as_deref(), language.as_deref())
+                .await
+                .map_err(err)?)
+        }
+        "tts.stop" => {
+            ctx.instance()?.stop_speech().map_err(err)?;
+            ok(())
         }
         _ => Err(format!("unknown method '{method}'")),
     }

@@ -13,6 +13,7 @@ pub use commands::{Command, CommandContext, CommandRegistry, PermissionChecker};
 pub use engine::{audio_runtime, AudioEngineFactory, EngineFactory, PlaybackEngine};
 pub use instance::{
     AudioSettings, EventEnvelope, InstanceConfig, InstanceEvent, InstanceHandle, InstanceStatus, PlayMode,
+    SpeechQueueFull,
 };
 pub use manager::{ConfigureError, ConfigureMode, InstanceManager, PlatformFactory, Services};
 pub use player::{QueueItem, RepeatMode, Requester};

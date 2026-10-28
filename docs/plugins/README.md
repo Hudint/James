@@ -155,6 +155,7 @@ bot.once('connect', () => …);
 | `trackEnd` | `{ item, error }` | A track ended (`error` is set when it failed). |
 | `queueChange` | `{ queue }` | The queue changed. |
 | `playbackChange` | `{ status }` | Pause, volume, repeat, position jumps, … |
+| `speechStart` / `speechEnd` | `{ id, text }` / `{ id, error, stopped }` | Text to speech started / ended. |
 | `ws.connect` / `ws.message` / `ws.close` | `{ connection, user, data }` | WebSocket of the plugin's web page ([web](#web-pages-and-http)). |
 | `custom:<name>` | `{ name, data, from }` | Custom event sent with `bot.emit(name, data)` by any plugin. |
 
@@ -257,6 +258,20 @@ const tracks = await bot.library.search('beatles', { limit: 10 });
 
 Tracks a plugin adds are shown as requested by the plugin. Changing saved playlists needs the
 `playlists` permission.
+
+## Text to speech
+
+```ts
+await bot.say('Welcome!');                              // the instance's voice
+await bot.say('Good evening', { language: 'en' });      // the best English voice
+const voices = await bot.tts.voices();                  // [{ id, name, language, provider }]
+await bot.say('Hallo', { voice: voices[0].id });
+await bot.tts.stop();                                   // cancel the playing and queued speech
+```
+
+Speech plays over the music, which is lowered meanwhile, and is queued when several requests come
+in. Texts are at most 500 characters. Which voices exist depends on the server: see
+[Text to speech](../tts.md).
 
 ## Store
 

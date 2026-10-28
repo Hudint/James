@@ -61,6 +61,8 @@ export interface InstanceStatus {
   queueLength: number;
   /** Why the last connection attempt failed (while not connected). */
   lastError: string | null;
+  /** Texts being spoken or waiting to be. */
+  speech: number;
 }
 
 export interface AudioSettings {
@@ -78,6 +80,14 @@ export interface InstanceConfig {
   command_prefix: string;
   now_playing_description: boolean;
   autostart: boolean;
+  tts_voice?: string | null;
+}
+
+export interface TtsVoice {
+  id: string;
+  name: string;
+  language: string;
+  provider: string;
 }
 
 export interface ConfigField {
@@ -230,6 +240,8 @@ export type InstanceEvent =
   | { instance: string; type: 'trackStarted'; item: QueueItem }
   | { instance: string; type: 'trackEnded'; item: QueueItem; error: string | null }
   | { instance: string; type: 'queueChanged' }
-  | { instance: string; type: 'playbackChanged'; status: InstanceStatus };
+  | { instance: string; type: 'playbackChanged'; status: InstanceStatus }
+  | { instance: string; type: 'speechStarted'; id: number; text: string }
+  | { instance: string; type: 'speechEnded'; id: number; error: string | null; stopped: boolean };
 
 export type ServerEvent = InstanceEvent | { type: 'lagged'; skipped: number };

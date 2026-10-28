@@ -261,6 +261,10 @@ test('SinusBot script: compat modules, sync calls, events', async () => {
     assert.equal(list.params.text, 'playlists: Chill,Rock');
     await host.wait('plugin store write', () => host.find('store.set'));
     assert.equal(host.find('store.set')!.params.scope, 'plugin');
+
+    host.event('platform', { event: { type: 'message', mode: 'client', from: alice, text: 'say good morning' } });
+    const say = await host.wait('audio.say', () => host.find('tts.say'));
+    assert.deepEqual(say.params, { text: 'good morning', voice: null, language: 'en' });
   } finally {
     host.kill();
   }

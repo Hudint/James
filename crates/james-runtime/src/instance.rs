@@ -14,7 +14,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use anyhow::{anyhow, Context};
-use james_audio::{EngineConfig, EngineEvent, PlayRequest};
+use james_audio::{EngineConfig, EngineEvent, PlayRequest, SpeechRequest};
 use james_core::platform::{
     Client, MessageTarget, PlatformCommand, PlatformContext, PlatformEvent, PlatformId, Snapshot,
 };
@@ -41,6 +41,8 @@ pub struct InstanceConfig {
     /// Show the current track in the bot's description.
     pub now_playing_description: bool,
     pub autostart: bool,
+    /// Voice for text to speech (`None` = the default voice).
+    pub tts_voice: Option<String>,
 }
 
 impl InstanceConfig {
@@ -85,6 +87,7 @@ impl Default for InstanceConfig {
             command_prefix: "!".into(),
             now_playing_description: true,
             autostart: true,
+            tts_voice: None,
         }
     }
 }
@@ -137,6 +140,8 @@ pub struct InstanceStatus {
     pub queue_length: usize,
     /// Why the last connection attempt failed (while not connected).
     pub last_error: Option<String>,
+    /// Texts being spoken or waiting to be.
+    pub speech: usize,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -168,6 +173,17 @@ pub enum InstanceEvent {
     Notice {
         source: String,
         message: String,
+    },
+    /// Speech started playing.
+    SpeechStarted {
+        id: u64,
+        text: String,
+    },
+    /// Speech ended (`error` if it failed, `stopped` if it was cancelled).
+    SpeechEnded {
+        id: u64,
+        error: Option<String>,
+        stopped: bool,
     },
 }
 
@@ -218,6 +234,13 @@ enum Control {
     Status {
         reply: oneshot::Sender<InstanceStatus>,
     },
+    Say {
+        text: String,
+        voice: Option<String>,
+        language: Option<String>,
+        reply: Reply<u64>,
+    },
+    StopSpeech,
     Queue {
         reply: oneshot::Sender<Vec<QueueItem>>,
     },
@@ -225,6 +248,10 @@ enum Control {
 }
 
 enum Internal {
+    Synthesized {
+        id: u64,
+        result: anyhow::Result<james_core::tts::Speech>,
+    },
     Opened {
         generation: u64,
         /// Decoder input, cached loudness and the cache key it was looked up with.
@@ -385,6 +412,24 @@ impl InstanceHandle {
     pub async fn status(&self) -> anyhow::Result<InstanceStatus> {
         self.ask(|reply| Control::Status { reply }).await
     }
+    /// Speaks `text` over the music (with the instance's voice unless `voice` or `language`
+    /// pick another). Resolves once the speech is queued.
+    pub async fn say(&self, text: &str, voice: Option<&str>, language: Option<&str>) -> anyhow::Result<u64> {
+        let (tx, rx) = oneshot::channel();
+        self.send(Control::Say {
+            text: text.to_owned(),
+            voice: voice.map(str::to_owned),
+            language: language.map(str::to_owned),
+            reply: tx,
+        })?;
+        rx.await.map_err(|_| anyhow!("instance is not running"))?
+    }
+
+    /// Cancels the playing and queued speech.
+    pub fn stop_speech(&self) -> anyhow::Result<()> {
+        self.send(Control::StopSpeech)
+    }
+
     pub async fn queue(&self) -> anyhow::Result<Vec<QueueItem>> {
         self.ask(|reply| Control::Queue { reply }).await
     }
@@ -440,6 +485,32 @@ impl InstanceHandle {
     ) -> anyhow::Result<()> {
         let client = (mode == MessageTarget::Client).then(|| to.id.clone());
         self.send_message(mode, client, text).await
+    }
+}
+
+/// Speech queued or being synthesized per instance.
+const MAX_PENDING_SPEECH: usize = 16;
+/// Longest a synthesis may take (including loading the voice).
+const SYNTHESIS_TIMEOUT: Duration = Duration::from_secs(90);
+
+/// The instance has too much speech queued.
+#[derive(Debug)]
+pub struct SpeechQueueFull;
+
+impl std::fmt::Display for SpeechQueueFull {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("too much speech queued, try again later")
+    }
+}
+
+impl std::error::Error for SpeechQueueFull {}
+
+/// A background task that is cancelled when this is dropped.
+struct AbortOnDrop(tokio::task::AbortHandle);
+
+impl Drop for AbortOnDrop {
+    fn drop(&mut self) {
+        self.0.abort();
     }
 }
 
@@ -540,6 +611,9 @@ pub(crate) fn spawn(
         description: description_tx,
         command_workers: HashMap::new(),
         command_times: HashMap::new(),
+        speech: HashMap::new(),
+        synthesizing: HashMap::new(),
+        next_speech: 0,
     };
     let join = tokio::spawn(task.run(control_rx, internal_rx, platform_events_rx, engine_events_rx));
     Ok((handle, join))
@@ -633,6 +707,12 @@ struct InstanceTask {
     description: watch::Sender<String>,
     command_workers: HashMap<String, mpsc::Sender<CommandJob>>,
     command_times: HashMap<String, VecDeque<Instant>>,
+    /// Speech being synthesized, queued or playing: its text and audio file (removed when it
+    /// ended).
+    speech: HashMap<u64, (String, Option<Arc<james_core::source::TempFile>>)>,
+    /// Syntheses in progress (cancelled when dropped, e.g. on stop or shutdown).
+    synthesizing: HashMap<u64, AbortOnDrop>,
+    next_speech: u64,
 }
 
 impl InstanceTask {
@@ -707,6 +787,7 @@ impl InstanceTask {
             } else {
                 self.last_error.clone()
             },
+            speech: self.speech.len(),
         }
     }
 
@@ -843,6 +924,13 @@ impl InstanceTask {
                 let _ = reply.send(self.player.queue().iter().cloned().collect());
             }
             // Handled in `run`.
+            Control::Say {
+                text,
+                voice,
+                language,
+                reply,
+            } => self.say(text, voice, language, reply),
+            Control::StopSpeech => self.stop_speech(),
             Control::Shutdown => {}
         }
     }
@@ -922,8 +1010,90 @@ impl InstanceTask {
         self.player.current().filter(|i| i.id == playing.item).cloned()
     }
 
+    /// Checks the request and answers with its id, then synthesizes in the background (Piper
+    /// takes a moment) and queues the speech. Failures after the answer end in `SpeechEnded`.
+    fn say(&mut self, text: String, voice: Option<String>, language: Option<String>, reply: Reply<u64>) {
+        if self.speech.len() >= MAX_PENDING_SPEECH {
+            let _ = reply.send(Err(SpeechQueueFull.into()));
+            return;
+        }
+        let tts = self.services.tts.read().clone();
+        // An explicit language picks among the voices; otherwise the instance's voice (if it
+        // is still installed, else the default one).
+        let voice = voice.or_else(|| {
+            language
+                .is_none()
+                .then(|| self.config.tts_voice.clone())
+                .flatten()
+                .filter(|v| tts.has_voice(v))
+        });
+        let (text, voice) = match tts.prepare(&text, voice.as_deref(), language.as_deref()) {
+            Ok(prepared) => prepared,
+            Err(e) => {
+                let _ = reply.send(Err(e));
+                return;
+            }
+        };
+        self.next_speech += 1;
+        let id = self.next_speech;
+        self.speech.insert(id, (text.clone(), None));
+        let internal = self.internal.clone();
+        let task = tokio::spawn(async move {
+            let result = match tokio::time::timeout(SYNTHESIS_TIMEOUT, tts.speak(&text, &voice)).await {
+                Ok(result) => result,
+                Err(_) => Err(anyhow!("text to speech took too long")),
+            };
+            let _ = internal.send(Internal::Synthesized { id, result });
+        });
+        self.synthesizing.insert(id, AbortOnDrop(task.abort_handle()));
+        let _ = reply.send(Ok(id));
+    }
+
+    /// Cancels the syntheses in progress and the queued and playing speech.
+    fn stop_speech(&mut self) {
+        let cancelled: Vec<u64> = self.synthesizing.drain().map(|(id, _)| id).collect();
+        for id in cancelled {
+            if self.speech.remove(&id).is_some() {
+                self.emit(InstanceEvent::SpeechEnded {
+                    id,
+                    error: None,
+                    stopped: true,
+                });
+            }
+        }
+        self.engine.stop_speech();
+    }
+
     fn handle_internal(&mut self, internal: Internal) {
         match internal {
+            Internal::Synthesized { id, result } => {
+                // Cancelled meanwhile: the result (and its audio file) is dropped.
+                if self.synthesizing.remove(&id).is_none() {
+                    return;
+                }
+                match result {
+                    Ok(speech) => {
+                        if let Some(entry) = self.speech.get_mut(&id) {
+                            entry.1 = speech.temp;
+                        }
+                        self.engine.speak(SpeechRequest {
+                            id,
+                            input: speech.input,
+                            known_lufs: speech.loudness,
+                        });
+                    }
+                    Err(e) => {
+                        let error = format!("{e:#}");
+                        tracing::warn!(instance = %self.config.id, %error, "text to speech failed");
+                        self.speech.remove(&id);
+                        self.emit(InstanceEvent::SpeechEnded {
+                            id,
+                            error: Some(james_core::text::user_message(&error)),
+                            stopped: false,
+                        });
+                    }
+                }
+            }
             Internal::Opened { generation, result } => {
                 let Some(item) = self.current_item(generation) else {
                     return;
@@ -964,6 +1134,21 @@ impl InstanceTask {
 
     fn handle_engine(&mut self, event: EngineEvent) {
         match event {
+            EngineEvent::SpeechStarted { id } => {
+                if let Some((text, _)) = self.speech.get(&id) {
+                    let text = text.clone();
+                    self.emit(InstanceEvent::SpeechStarted { id, text });
+                }
+            }
+            EngineEvent::SpeechFinished { id, error, stopped } => {
+                // Dropping the entry removes the audio file.
+                if self.speech.remove(&id).is_some() {
+                    if let Some(error) = &error {
+                        tracing::warn!(instance = %self.config.id, %error, "speech failed");
+                    }
+                    self.emit(InstanceEvent::SpeechEnded { id, error, stopped });
+                }
+            }
             EngineEvent::Started { id } => {
                 let Some(item) = self.current_item(id) else { return };
                 if let Some(playing) = &mut self.playing {

@@ -15,6 +15,7 @@ james-plugins = { path = "../james-plugins" }
 james-runtime = { path = "../james-runtime" }
 james-sources = { path = "../james-sources" }
 james-teamspeak = { path = "../james-teamspeak" }
+james-tts = { path = "../james-tts" }
 anyhow.workspace = true
 async-trait.workspace = true
 axum = "0.8"

@@ -51,13 +51,14 @@ fn is_same_origin(headers: &axum::http::HeaderMap) -> bool {
         .is_some_and(|(_, authority)| authority.eq_ignore_ascii_case(host))
 }
 
-/// Rejects requests for unknown host names (DNS rebinding) when `allowed_hosts` is set.
+/// Rejects requests for unknown host names (DNS rebinding) when `allowed_hosts` is set. The
+/// health check is exempt: it reveals nothing and container health checks use `127.0.0.1`.
 pub async fn allowed_hosts(
     axum::extract::State(hosts): axum::extract::State<std::sync::Arc<Vec<String>>>,
     request: Request,
     next: Next,
 ) -> Response {
-    if !hosts.is_empty() {
+    if !hosts.is_empty() && request.uri().path() != "/api/v1/health" {
         let host = request
             .headers()
             .get(header::HOST)

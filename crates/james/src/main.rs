@@ -44,7 +44,15 @@ fn private_dir(path: &Path) -> anyhow::Result<()> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700))?;
+        match std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700)) {
+            Ok(()) => {}
+            // E.g. a mounted volume of another user: its owner could read the keys.
+            Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => anyhow::bail!(
+                "{} belongs to another user; give it to the user running James (chown)",
+                path.display()
+            ),
+            Err(e) => return Err(e).with_context(|| format!("cannot set permissions of {}", path.display())),
+        }
     }
     Ok(())
 }
@@ -107,6 +115,9 @@ async fn run(args: Args, config: Config, audio: tokio::runtime::Handle) -> anyho
         config.tools.ffmpeg.clone(),
     );
     services.http_proxy = Some(egress.url().to_owned());
+    if config.tts.enabled {
+        setup_tts(&config, &services, &work_dir);
+    }
     let links = LinkCodes::default();
     james_runtime::builtin::register(&services.commands);
     integration::register_link_command(&services.commands, db.clone(), links.clone());
@@ -144,6 +155,16 @@ async fn run(args: Args, config: Config, audio: tokio::runtime::Handle) -> anyho
     } else {
         None
     };
+    let oidc = match config.auth.oidc.enabled {
+        true => {
+            let roles: Vec<String> = db.roles().await?.into_iter().map(|r| r.name).collect();
+            if let Some(missing) = config.auth.oidc.default_roles.iter().find(|r| !roles.contains(r)) {
+                anyhow::bail!("auth.oidc.default_roles: the role '{missing}' does not exist");
+            }
+            Some(james_api::oidc::Oidc::new(config.auth.oidc.clone())?)
+        }
+        false => None,
+    };
     let state = AppState {
         setup_token: Arc::new(parking_lot::Mutex::new(setup_token)),
         db: db.clone(),
@@ -158,6 +179,7 @@ async fn run(args: Args, config: Config, audio: tokio::runtime::Handle) -> anyho
         secure_cookies: config.http.secure_cookies,
         plugins,
         plugin_tokens: Default::default(),
+        oidc,
     };
     let app = james_api::app(state, config.http.web_root.clone());
     if !config.http.bind.ip().is_loopback() && config.http.allowed_hosts.is_empty() {
@@ -184,6 +206,38 @@ async fn run(args: Args, config: Config, audio: tokio::runtime::Handle) -> anyho
     }
     manager.stop_all().await;
     Ok(())
+}
+
+/// Registers the Piper voices (and loads the default voice in the background).
+fn setup_tts(config: &Config, services: &Services, work_dir: &Path) {
+    let mut piper = config.tts.piper.clone();
+    if piper.voices_dir.is_relative() {
+        piper.voices_dir = config.data_dir.join(&piper.voices_dir);
+    }
+    let voices_dir = piper.voices_dir.clone();
+    let provider = match james_tts::piper::PiperProvider::new(piper, work_dir.join("tts")) {
+        Ok(provider) => provider,
+        Err(e) => {
+            tracing::warn!(error = %format!("{e:#}"), "text to speech is unavailable");
+            return;
+        }
+    };
+    let voices = james_core::tts::TtsProvider::voices(&*provider);
+    if voices.is_empty() {
+        tracing::warn!(dir = %voices_dir.display(), "no Piper voices installed, text to speech is unavailable");
+        return;
+    }
+    let default = config
+        .tts
+        .default_voice
+        .clone()
+        .filter(|v| voices.iter().any(|voice| voice.id == *v))
+        .unwrap_or_else(|| voices[0].id.clone());
+    tracing::info!(voices = voices.len(), default = %default, "text to speech ready");
+    provider.warm_up(&default);
+    let mut registry = services.tts.write();
+    registry.register(provider);
+    registry.set_default_voice(Some(default));
 }
 
 /// Starts the plugin host supervisor (if enabled and installed).

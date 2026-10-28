@@ -214,7 +214,12 @@ async fn restart(State(state): State<AppState>, auth: Auth, Path(id): Path<Strin
 }
 
 /// The running instance, after checking `permission` for it.
-fn running(state: &AppState, auth: &Auth, id: &str, permission: &str) -> ApiResult<InstanceHandle> {
+pub(super) fn running(
+    state: &AppState,
+    auth: &Auth,
+    id: &str,
+    permission: &str,
+) -> ApiResult<InstanceHandle> {
     auth.require(permission, Some(id))?;
     state
         .manager

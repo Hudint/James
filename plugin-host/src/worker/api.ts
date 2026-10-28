@@ -243,6 +243,8 @@ export function installEvents(ctx: Context): void {
     trackEnd: (p) => p,
     queueChange: (p) => p,
     playbackChange: (p) => p,
+    speechStart: (p) => p,
+    speechEnd: (p) => p,
   };
   for (const name of ['clientBack', 'clientMute', 'clientUnmute', 'clientDeaf', 'clientUndeaf', 'clientRecord', 'clientRecordStop']) {
     map[name] = (p) => ({ client: client(p.clientId) });
@@ -468,6 +470,12 @@ export function createBot(ctx: Context) {
       start: (id: string) => call('instances.start', { id }),
       stop: (id: string) => call('instances.stop', { id }),
       restart: (id: string) => call('instances.restart', { id }),
+    },
+    say: (text: string, options: { voice?: string; language?: string } = {}) =>
+      call('tts.say', { text: String(text), voice: options.voice ?? null, language: options.language ?? null }),
+    tts: {
+      voices: () => call('tts.voices'),
+      stop: () => call('tts.stop'),
     },
     notify: (message: string) => call('engine.notify', { message: String(message) }),
     saveConfig: (config: Record<string, unknown>) => call('engine.saveConfig', { config }),

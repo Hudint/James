@@ -110,6 +110,8 @@ pub enum Call {
     Pause(bool),
     Volume(u8),
     Seek(Duration),
+    Speak(u64),
+    StopSpeech,
 }
 
 #[derive(Default)]
@@ -195,6 +197,12 @@ impl PlaybackEngine for FakeEngine {
     fn set_bitrate(&self, _: u32) {}
     fn position(&self) -> Duration {
         Duration::ZERO
+    }
+    fn speak(&self, request: james_audio::SpeechRequest) {
+        self.0.calls.lock().push(Call::Speak(request.id));
+    }
+    fn stop_speech(&self) {
+        self.0.calls.lock().push(Call::StopSpeech);
     }
 }
 

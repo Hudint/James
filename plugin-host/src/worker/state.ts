@@ -126,6 +126,10 @@ export class InstanceState {
       case 'playbackChanged':
         this.setStatus(envelope.status);
         return [['playbackChange', { status: envelope.status }]];
+      case 'speechStarted':
+        return [['speechStart', { id: envelope.id, text: envelope.text }]];
+      case 'speechEnded':
+        return [['speechEnd', { id: envelope.id, error: envelope.error ?? null, stopped: !!envelope.stopped }]];
       default:
         return [];
     }

@@ -23,6 +23,7 @@
     'library.manage',
     'playlist.read',
     'playlist.manage',
+    'tts.say',
     'plugins.manage',
     'plugins.use',
     'users.manage',

@@ -13,7 +13,7 @@ pub mod dsp;
 pub mod encoder;
 pub mod engine;
 
-pub use engine::{AudioEngine, EngineConfig, EngineEvent, EngineStatus, PlayRequest};
+pub use engine::{AudioEngine, EngineConfig, EngineEvent, EngineStatus, PlayRequest, SpeechRequest};
 
 /// One interleaved stereo frame of 20 ms.
 pub type Frame = Box<[f32; james_core::audio::FRAME_LEN]>;

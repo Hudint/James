@@ -111,6 +111,8 @@ struct UserUpdate {
     is_admin: Option<bool>,
     disabled: Option<bool>,
     roles: Option<Vec<String>>,
+    /// Single sign-on identity (`<issuer>#<subject>`); empty removes the link.
+    oidc_subject: Option<String>,
 }
 
 async fn update(
@@ -123,7 +125,8 @@ async fn update(
     let target = state.db.user(id).await?;
     // All checks before any change, so a rejected request changes nothing.
     ensure_can_manage(&state, &auth, &target).await?;
-    if body.is_admin == Some(true) && !auth.user.is_admin {
+    // Linking an SSO identity hands the account to whoever owns that identity: admins only.
+    if (body.is_admin == Some(true) || body.oidc_subject.is_some()) && !auth.user.is_admin {
         return Err(ApiError::forbidden());
     }
     if id == auth.user.id && (body.is_admin == Some(false) || body.disabled == Some(true)) {
@@ -138,6 +141,23 @@ async fn update(
             "use the account page to change your own password",
         ));
     }
+    // The link first: it is the change that can conflict (another account has it), so a
+    // conflict leaves everything else unchanged.
+    if let Some(subject) = &body.oidc_subject {
+        let subject = Some(subject.trim()).filter(|s| !s.is_empty());
+        state.db.set_oidc_subject(id, subject).await?;
+    }
+    // Credentials or rights change: existing sessions of that user must not keep working
+    // (ended before the change, so a failure halfway cannot leave them valid).
+    let security_relevant = body.password.is_some()
+        || body.disabled == Some(true)
+        || body.is_admin == Some(false)
+        || body.roles.is_some()
+        || body.oidc_subject.is_some();
+    if security_relevant && id != auth.user.id {
+        state.db.revoke_user_tokens(id, None).await?;
+        state.plugin_tokens.revoke_user(id);
+    }
     if let Some(password) = &body.password {
         state.db.set_password(id, Some(password)).await?;
     }
@@ -150,12 +170,8 @@ async fn update(
     if let Some(roles) = &body.roles {
         state.db.set_user_roles(id, roles).await?;
     }
-    // Credentials or rights changed: existing sessions of that user must not keep working.
-    let security_relevant = body.password.is_some()
-        || body.disabled == Some(true)
-        || body.is_admin == Some(false)
-        || body.roles.is_some();
     if security_relevant && id != auth.user.id {
+        // Again: a login in the meantime still used the old credentials.
         state.db.revoke_user_tokens(id, None).await?;
         state.plugin_tokens.revoke_user(id);
     }

@@ -245,3 +245,174 @@ async fn queue_operations_use_stable_ids() {
     assert_eq!(locator, "d", "jump starts a new playback of the item");
     assert_eq!(instance.status().await.unwrap().current.unwrap().track.title, "d");
 }
+
+/// Text to speech with a fake provider that writes a file (removed after the speech ended).
+mod speech {
+    use std::sync::Arc;
+
+    use async_trait::async_trait;
+    use james_core::source::{MediaInput, TempFile};
+    use james_core::tts::{Speech, TtsProvider, Voice};
+
+    use super::*;
+
+    /// Writes the text to a file; "slow …" never finishes, "fail …" fails.
+    struct FakeTts(std::path::PathBuf);
+
+    #[async_trait]
+    impl TtsProvider for FakeTts {
+        fn id(&self) -> &str {
+            "fake"
+        }
+        fn voices(&self) -> Vec<Voice> {
+            vec![Voice {
+                id: "anna".into(),
+                name: "Anna".into(),
+                language: "de-DE".into(),
+                provider: "fake".into(),
+            }]
+        }
+        async fn synthesize(&self, text: &str, _: &str) -> anyhow::Result<Speech> {
+            if text.starts_with("slow") {
+                std::future::pending::<()>().await;
+            }
+            anyhow::ensure!(!text.starts_with("fail"), "the voice broke");
+            let path = self.0.join(format!("{}.wav", text.len()));
+            std::fs::write(&path, text)?;
+            Ok(Speech {
+                input: MediaInput::File(path.clone()),
+                temp: Some(Arc::new(TempFile::new(path))),
+                loudness: None,
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn speech_is_queued_reported_and_cleaned_up() {
+        let dir = tempfile::tempdir().unwrap();
+        let h = Harness::start().await;
+        h.manager
+            .services()
+            .tts
+            .write()
+            .register(Arc::new(FakeTts(dir.path().to_path_buf())));
+        let mut events = h.manager.subscribe();
+        let instance = h.handle();
+
+        assert!(
+            instance.say("hi", Some("nobody"), None).await.is_err(),
+            "unknown voice"
+        );
+        assert!(instance.say("   ", None, None).await.is_err(), "nothing to say");
+        let id = instance.say("hello there", None, Some("de")).await.unwrap();
+        eventually("speech queued in the engine", || async {
+            h.engine.calls.lock().contains(&Call::Speak(id))
+        })
+        .await;
+        let file = dir.path().join("11.wav");
+        assert!(file.exists());
+
+        h.engine.emit(EngineEvent::SpeechStarted { id });
+        h.engine.emit(EngineEvent::SpeechFinished {
+            id,
+            error: None,
+            stopped: false,
+        });
+        let mut started = None;
+        loop {
+            match events.recv().await.unwrap().event {
+                InstanceEvent::SpeechStarted { id: got, text } => started = Some((got, text)),
+                InstanceEvent::SpeechEnded {
+                    id: got,
+                    error,
+                    stopped,
+                } => {
+                    assert_eq!((got, error, stopped), (id, None, false));
+                    break;
+                }
+                _ => {}
+            }
+        }
+        assert_eq!(started, Some((id, "hello there".to_string())));
+        assert!(!file.exists(), "the audio file is removed after the speech");
+
+        instance.stop_speech().unwrap();
+        instance.status().await.unwrap();
+        assert!(h.engine.calls.lock().contains(&Call::StopSpeech));
+    }
+
+    async fn ended(
+        events: &mut tokio::sync::broadcast::Receiver<james_runtime::EventEnvelope>,
+        id: u64,
+    ) -> (Option<String>, bool) {
+        loop {
+            if let InstanceEvent::SpeechEnded {
+                id: got,
+                error,
+                stopped,
+            } = events.recv().await.unwrap().event
+            {
+                if got == id {
+                    return (error, stopped);
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn hush_cancels_syntheses_in_progress() {
+        let dir = tempfile::tempdir().unwrap();
+        let h = Harness::start().await;
+        h.manager
+            .services()
+            .tts
+            .write()
+            .register(Arc::new(FakeTts(dir.path().to_path_buf())));
+        let mut events = h.manager.subscribe();
+        let instance = h.handle();
+        let slow = instance.say("slow one", None, None).await.unwrap();
+        instance.stop_speech().unwrap();
+        assert_eq!(ended(&mut events, slow).await, (None, true));
+        // The slot is free again and later speech is not affected.
+        let next = instance.say("after", None, None).await.unwrap();
+        eventually("new speech queued", || async {
+            h.engine.calls.lock().contains(&Call::Speak(next))
+        })
+        .await;
+        assert!(!h.engine.calls.lock().contains(&Call::Speak(slow)));
+    }
+
+    #[tokio::test]
+    async fn failed_synthesis_and_full_queue_are_reported() {
+        let dir = tempfile::tempdir().unwrap();
+        let h = Harness::start().await;
+        h.manager
+            .services()
+            .tts
+            .write()
+            .register(Arc::new(FakeTts(dir.path().to_path_buf())));
+        let mut events = h.manager.subscribe();
+        let instance = h.handle();
+        let failing = instance.say("fail now", None, None).await.unwrap();
+        let (error, stopped) = ended(&mut events, failing).await;
+        assert!(error.unwrap().contains("the voice broke") && !stopped);
+
+        for _ in 0..16 {
+            instance.say("slow", None, None).await.unwrap();
+        }
+        let error = instance.say("one more", None, None).await.unwrap_err();
+        assert!(
+            error.downcast_ref::<james_runtime::SpeechQueueFull>().is_some(),
+            "{error}"
+        );
+        instance.stop_speech().unwrap();
+        instance.say("room again", None, None).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn speech_without_voices_fails() {
+        let h = Harness::start().await;
+        let error = h.handle().say("hi", None, None).await.unwrap_err();
+        assert!(error.to_string().contains("no text-to-speech voice"), "{error}");
+    }
+}

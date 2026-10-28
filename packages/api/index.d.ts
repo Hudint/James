@@ -159,6 +159,20 @@ export interface Bot {
   /** All bot instances (`instances` for anything but listing the plugin's own). */
   readonly instances: Instances;
 
+  /**
+   * Speaks `text` over the music (which is ducked meanwhile), with the instance's voice or the
+   * best voice for `language` (e.g. `"de"`, `"en-US"`). Resolves with the speech id once it is
+   * accepted (rejects for an unknown voice, empty or too long text, or a full queue);
+   * `speechStart` / `speechEnd` follow (`speechEnd` carries the error if synthesis failed).
+   */
+  say(text: string, options?: { voice?: string; language?: string }): Promise<number>;
+  readonly tts: {
+    /** Installed voices. */
+    voices(): Promise<TtsVoice[]>;
+    /** Cancels the playing and queued speech. */
+    stop(): Promise<void>;
+  };
+
   /** Shows a message to the users of the web interface. */
   notify(message: string): Promise<void>;
   /** Replaces this instance's configuration (persisted; {@link Bot.config} keeps the old values until restart). */
@@ -225,6 +239,9 @@ export interface Events {
   trackEnd: { item: QueueItem; error: string | null };
   queueChange: { queue: QueueItem[] };
   playbackChange: { status: PlayerStatus };
+  /** Speech (from `bot.say`, `!say`, the web interface or another plugin) started. */
+  speechStart: { id: number; text: string };
+  speechEnd: { id: number; error: string | null; stopped: boolean };
   /** A WebSocket connection of the plugin's web page opened (`web`). */
   'ws.connect': { connection: string; user: WebUser | null };
   'ws.message': { connection: string; data: string };
@@ -374,6 +391,14 @@ export interface ChannelParams {
   neededTalkPower?: number;
   deleteDelay?: number;
   phoneticName?: string;
+}
+
+export interface TtsVoice {
+  id: string;
+  name: string;
+  /** BCP 47 tag, e.g. `de-DE`. */
+  language: string;
+  provider: string;
 }
 
 export interface Group {

@@ -1,0 +1,26 @@
+# James with a PO token provider for YouTube (needed on most datacenter IPs).
+# Start: docker compose up -d   — then open http://<host>:8087 and enter the setup token
+# printed in the log (docker compose logs james | grep setup_token).
+services:
+  james:
+    image: ghcr.io/hudint/james:latest
+    build: .
+    restart: unless-stopped
+    ports:
+      # Reachable from other hosts for the first setup. Behind a reverse proxy (HTTPS),
+      # publish it on this machine only: "127.0.0.1:8087:8087".
+      - "8087:8087"
+    volumes:
+      - ./data:/data
+    environment:
+      JAMES_YTDLP__POT_PROVIDER: http://bgutil:4416
+      # Domain the web interface is served under (protects against DNS rebinding):
+      # JAMES_HTTP__ALLOWED_HOSTS: '["james.example.com"]'
+      # Behind an HTTPS reverse proxy:
+      # JAMES_HTTP__SECURE_COOKIES: "true"
+    depends_on:
+      - bgutil
+
+  bgutil:
+    image: brainicism/bgutil-ytdlp-pot-provider:2.0.2   # same version as in the image
+    restart: unless-stopped

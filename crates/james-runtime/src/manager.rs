@@ -29,6 +29,8 @@ pub struct Services {
     pub ffmpeg: String,
     /// Egress proxy for ffmpeg network inputs.
     pub http_proxy: Option<String>,
+    /// Text-to-speech voices.
+    pub tts: Arc<RwLock<james_core::tts::TtsRegistry>>,
 }
 
 impl Services {
@@ -48,6 +50,7 @@ impl Services {
             events: broadcast::channel(4096).0,
             ffmpeg: ffmpeg.into(),
             http_proxy: None,
+            tts: Arc::default(),
         }
     }
 }

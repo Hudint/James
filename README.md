@@ -2,9 +2,9 @@
 
 A modern, plugin-extensible voice bot for TeamSpeak 3 / TeamSpeak 6 (Discord planned), inspired by SinusBot.
 
-> **Status:** early development – see [PLAN.md](PLAN.md) for scope, architecture and milestones.
+> **Status:** first release (0.1) – see [PLAN.md](PLAN.md) for scope, architecture and milestones.
 
-## Features (planned for the first release)
+## Features
 
 - High-quality music playback: YouTube & co. (yt-dlp), local library, radio/streams
 - Text-to-speech (Piper by default, swappable providers)
@@ -14,6 +14,17 @@ A modern, plugin-extensible voice bot for TeamSpeak 3 / TeamSpeak 6 (Discord pla
 - Web interface, chat commands, REST + WebSocket API
 - Multiple bot instances per process
 - Local accounts, roles, TeamSpeak identity linking, OIDC/SSO
+
+## Getting started
+
+```sh
+docker compose up -d   # see docker-compose.yml
+docker compose logs james | grep setup_token   # one-time token for the first administrator
+```
+
+Documentation: [installation](docs/installation.md), [configuration](docs/configuration.md),
+[usage](docs/usage.md), [text to speech](docs/tts.md), [single sign-on](docs/sso.md),
+[HTTP API](docs/api.md), [plugins](docs/plugins/README.md).
 
 ## Development
 

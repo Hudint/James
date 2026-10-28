@@ -24,8 +24,10 @@ pub struct Config {
     pub tools: ToolsConfig,
     pub media: MediaConfig,
     pub ytdlp: YtDlpConfig,
+    pub tts: TtsConfig,
     pub network: NetworkPolicy,
     pub plugins: PluginsConfig,
+    pub auth: AuthConfig,
     /// Instances defined in the config file (more can be created via the API).
     pub instances: Vec<InstanceConfig>,
 }
@@ -48,6 +50,32 @@ impl Default for ToolsConfig {
             ffprobe: "ffprobe".into(),
             max_concurrent: 8,
             audio_threads: 2,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct AuthConfig {
+    /// Single sign-on with OpenID Connect.
+    pub oidc: james_api::oidc::OidcConfig,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct TtsConfig {
+    pub enabled: bool,
+    /// Voice used when an instance has none configured (default: the first voice).
+    pub default_voice: Option<String>,
+    pub piper: james_tts::piper::PiperConfig,
+}
+
+impl Default for TtsConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            default_voice: None,
+            piper: james_tts::piper::PiperConfig::default(),
         }
     }
 }
@@ -123,8 +151,10 @@ impl Default for Config {
             tools: ToolsConfig::default(),
             media: MediaConfig::default(),
             ytdlp: YtDlpConfig::default(),
+            tts: TtsConfig::default(),
             network: NetworkPolicy::default(),
             plugins: PluginsConfig::default(),
+            auth: AuthConfig::default(),
             instances: Vec::new(),
         }
     }
@@ -155,7 +185,8 @@ impl Config {
     pub fn figment(path: &Path) -> Figment {
         Figment::from(Serialized::defaults(Config::default()))
             .merge(Toml::file(path))
-            .merge(Env::prefixed("JAMES_").split("__"))
+            // JAMES_CONFIG names the file itself and is not a setting.
+            .merge(Env::prefixed("JAMES_").ignore(&["config"]).split("__"))
     }
 
     pub fn load(path: &Path) -> anyhow::Result<Self> {
@@ -174,6 +205,17 @@ mod tests {
             let config = Config::load(Path::new("missing.toml")).unwrap();
             assert_eq!(config.http.bind.port(), 8087);
             assert_eq!(config.log.format, LogFormat::Pretty);
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn the_config_path_variable_is_not_a_setting() {
+        figment::Jail::expect_with(|jail| {
+            jail.set_env("JAMES_CONFIG", "/data/james.toml");
+            jail.set_env("JAMES_TTS__PIPER__PYTHON", "/opt/piper/bin/python");
+            let config = Config::load(Path::new("missing.toml")).unwrap();
+            assert_eq!(config.tts.piper.python, "/opt/piper/bin/python");
             Ok(())
         });
     }

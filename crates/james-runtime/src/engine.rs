@@ -2,7 +2,7 @@
 
 use std::time::Duration;
 
-use james_audio::{AudioEngine, EngineConfig, EngineEvent, PlayRequest};
+use james_audio::{AudioEngine, EngineConfig, EngineEvent, PlayRequest, SpeechRequest};
 use james_core::audio::OpusFrame;
 use tokio::runtime::Handle;
 use tokio::sync::mpsc;
@@ -16,6 +16,9 @@ pub trait PlaybackEngine: Send + Sync {
     fn seek(&self, position: Duration);
     fn set_bitrate(&self, bitrate: u32);
     fn position(&self) -> Duration;
+    /// Queues speech over the music (ducked).
+    fn speak(&self, request: SpeechRequest);
+    fn stop_speech(&self);
 }
 
 impl PlaybackEngine for AudioEngine {
@@ -39,6 +42,12 @@ impl PlaybackEngine for AudioEngine {
     }
     fn position(&self) -> Duration {
         self.status().position
+    }
+    fn speak(&self, request: SpeechRequest) {
+        AudioEngine::speak(self, request)
+    }
+    fn stop_speech(&self) {
+        AudioEngine::stop_speech(self)
     }
 }
 

@@ -4,6 +4,7 @@
   import { api } from '$lib/api';
   import { confirmAction } from '$lib/confirm.svelte';
   import AddMusic from '$lib/components/AddMusic.svelte';
+  import Speak from '$lib/components/Speak.svelte';
   import Icon from '$lib/components/Icon.svelte';
   import Player from '$lib/components/Player.svelte';
   import Queue from '$lib/components/Queue.svelte';
@@ -166,6 +167,8 @@
             <Player {id} {status} />
             {#if can('playback.play', id)}<AddMusic {id} />{/if}
             <Queue {id} items={entry?.queue ?? []} />
+            <!-- Narrow screens: below the queue (it matters more while music plays). -->
+            {#if narrow.matches && can('tts.say', id)}<Speak {id} {status} />{/if}
             {#if can('playback.control', id)}<p class="hint shortcuts">{t('player.shortcuts')}</p>{/if}
           </div>
         {/if}
@@ -181,6 +184,7 @@
             {:else}
               <div class="card empty"><p>{t('server.noData')}</p></div>
             {/if}
+            {#if !narrow.matches && can('tts.say', id)}<Speak {id} {status} />{/if}
           </div>
         {/if}
       </div>

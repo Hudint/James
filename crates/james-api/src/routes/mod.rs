@@ -3,6 +3,7 @@ mod instances;
 mod library;
 mod playlists;
 pub(crate) mod plugins;
+mod tts;
 mod users;
 mod ws;
 
@@ -16,6 +17,11 @@ use crate::AppState;
 const MAX_BODY: usize = 1024 * 1024;
 pub(crate) const MAX_UPLOAD: usize = 512 * 1024 * 1024;
 
+/// Liveness probe (Docker health check); no authentication, no details.
+async fn health() -> axum::Json<serde_json::Value> {
+    axum::Json(serde_json::json!({ "status": "ok" }))
+}
+
 pub fn router(state: AppState) -> Router {
     let api = Router::new()
         .merge(account::routes())
@@ -24,7 +30,9 @@ pub fn router(state: AppState) -> Router {
         .merge(playlists::routes())
         .merge(library::routes())
         .merge(plugins::routes())
-        .merge(ws::routes());
+        .merge(tts::routes())
+        .merge(ws::routes())
+        .route("/health", axum::routing::get(health));
     Router::new()
         .nest("/api/v1", api)
         .merge(plugins::web_routes())

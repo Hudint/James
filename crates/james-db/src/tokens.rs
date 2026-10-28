@@ -68,6 +68,46 @@ impl Db {
         Ok(token)
     }
 
+    /// Creates a login session, unless the account was disabled or its credentials changed
+    /// since `proof` was checked (`None` then).
+    pub async fn create_session(
+        &self,
+        user_id: i64,
+        proof: &crate::users::Proof,
+        lifetime_secs: i64,
+    ) -> Result<Option<String>> {
+        let mut bytes = [0u8; 32];
+        rand::rng().fill_bytes(&mut bytes);
+        let token = format!("jms_{}", hex::encode(bytes));
+        let created = now();
+        let (column, value) = match proof {
+            crate::users::Proof::Password(hash) => ("password_hash", hash),
+            crate::users::Proof::Oidc(subject) => ("oidc_subject", subject),
+        };
+        let inserted = sqlx::query(&format!(
+            "INSERT INTO tokens (token_hash, user_id, kind, name, created_at, expires_at) \
+             SELECT ?, id, ?, 'web', ?, ? FROM users WHERE id = ? AND disabled = 0 AND {column} = ?"
+        ))
+        .bind(hash(&token))
+        .bind(TokenKind::Session.as_str())
+        .bind(created)
+        .bind(created + lifetime_secs)
+        .bind(user_id)
+        .bind(value)
+        .execute(self.pool())
+        .await?;
+        Ok((inserted.rows_affected() == 1).then_some(token))
+    }
+
+    /// Whether `token` is a login session (not an API token).
+    pub async fn is_session(&self, token: &str) -> Result<bool> {
+        let kind: Option<String> = sqlx::query_scalar("SELECT kind FROM tokens WHERE token_hash = ?")
+            .bind(hash(token))
+            .fetch_optional(self.pool())
+            .await?;
+        Ok(kind.as_deref() == Some(TokenKind::Session.as_str()))
+    }
+
     /// Resolves a token to its (enabled) user and updates its last use.
     pub async fn token_user(&self, token: &str) -> Result<Option<User>> {
         let hashed = hash(token);

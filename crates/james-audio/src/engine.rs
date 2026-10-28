@@ -1,5 +1,6 @@
 //! Per-session real-time playback engine.
 
+use std::collections::VecDeque;
 use std::task::Poll;
 use std::time::Duration;
 
@@ -51,8 +52,27 @@ pub struct PlayRequest {
     pub known_lufs: Option<f32>,
 }
 
+/// Speech (or any other overlay) mixed over the music; the music is ducked meanwhile.
+#[derive(Debug, Clone)]
+pub struct SpeechRequest {
+    /// Caller-chosen id reported back in [`EngineEvent::SpeechStarted`] / `SpeechFinished`.
+    pub id: u64,
+    pub input: MediaInput,
+    /// Integrated loudness, if known (speech is short: measured live it would barely be
+    /// corrected).
+    pub known_lufs: Option<f32>,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum EngineEvent {
+    /// A speech request started playing.
+    SpeechStarted { id: u64 },
+    /// A speech request ended (`error` if it failed, `stopped` if it was cancelled).
+    SpeechFinished {
+        id: u64,
+        error: Option<String>,
+        stopped: bool,
+    },
     /// The first audio frame of the request was sent.
     Started { id: u64 },
     /// Playback of the request ended. `stopped` = ended by a command (play/stop), not by itself.
@@ -72,6 +92,8 @@ pub struct EngineStatus {
     pub volume: u8,
     /// Number of 20 ms frames the decoder could not deliver in time.
     pub underruns: u64,
+    /// Speech request playing, if any.
+    pub speech: Option<u64>,
 }
 
 enum Command {
@@ -81,6 +103,8 @@ enum Command {
     Volume(u8),
     Seek(Duration),
     Bitrate(u32),
+    Speak(SpeechRequest),
+    StopSpeech,
 }
 
 /// Handle to a running engine task. Dropping all handles stops the task.
@@ -129,6 +153,10 @@ impl AudioEngine {
             pending_seek: None,
             seek_requested: None,
             last_seek: None,
+            speech: None,
+            speech_queue: VecDeque::new(),
+            duck: GainRamp::new(1.0),
+            duck_db: 0.0,
         };
         runtime.spawn(task.run(rx));
         Ok(Self { commands, status })
@@ -152,6 +180,16 @@ impl AudioEngine {
 
     pub fn seek(&self, position: Duration) {
         let _ = self.commands.send(Command::Seek(position));
+    }
+
+    /// Queues speech; it plays over the music (ducked) after earlier speech requests.
+    pub fn speak(&self, request: SpeechRequest) {
+        let _ = self.commands.send(Command::Speak(request));
+    }
+
+    /// Cancels the playing and all queued speech.
+    pub fn stop_speech(&self) {
+        let _ = self.commands.send(Command::StopSpeech);
     }
 
     pub fn set_bitrate(&self, bitrate: u32) {
@@ -180,6 +218,38 @@ const PROCESS_SEEK_DEBOUNCE: Duration = Duration::from_millis(700);
 const SEEK_INTERVAL: Duration = Duration::from_millis(150);
 /// Maximum wait for ffmpeg's exit status after its output ended.
 const EXIT_TIMEOUT: Duration = Duration::from_secs(2);
+/// Music level while speech plays.
+const DUCK_DB: f32 = -14.0;
+/// Duck gain change per 20 ms frame: down in ~100 ms, back up in ~300 ms.
+const DUCK_ATTACK_DB: f32 = 2.8;
+const DUCK_RELEASE_DB: f32 = 0.9;
+/// Speech frames buffered before it starts, and the longest wait for a speech decoder.
+const SPEECH_PREROLL: usize = 5;
+const SPEECH_TIMEOUT: Duration = Duration::from_secs(10);
+/// Speech that stops delivering audio for this long has failed.
+const SPEECH_STALL: Duration = Duration::from_secs(3);
+/// Queued speech requests (older ones are dropped beyond this).
+const MAX_SPEECH_QUEUE: usize = 32;
+/// Loudness of speech (a little above the music target, it must be understood).
+const SPEECH_LUFS_OFFSET: f32 = 2.0;
+
+/// The speech request playing.
+struct Speech {
+    id: u64,
+    decoder: Decoder,
+    normalizer: Normalizer,
+    started: bool,
+    since: Instant,
+    last_frame: Instant,
+    ended_at: Option<Instant>,
+}
+
+impl Speech {
+    /// Audible (the music is ducked): not while buffering or after the end.
+    fn speaking(&self) -> bool {
+        self.started && self.ended_at.is_none()
+    }
+}
 
 /// State kept when re-opening the input after a seek.
 struct Resume {
@@ -220,6 +290,11 @@ struct EngineTask {
     pending_seek: Option<Duration>,
     seek_requested: Option<Instant>,
     last_seek: Option<Instant>,
+    speech: Option<Speech>,
+    speech_queue: VecDeque<SpeechRequest>,
+    /// Ducking of the music while speech plays.
+    duck: GainRamp,
+    duck_db: f32,
 }
 
 impl EngineTask {
@@ -236,6 +311,7 @@ impl EngineTask {
             }
         }
         self.finish_stopped();
+        self.stop_speech();
     }
 
     fn handle(&mut self, command: Command) {
@@ -247,12 +323,12 @@ impl EngineTask {
             }
             Command::Stop => {
                 self.finish_stopped();
-                self.end_transmission();
+                self.end_if_silent();
             }
             Command::Pause(paused) => {
                 self.status.send_modify(|s| s.paused = paused);
                 if paused {
-                    self.end_transmission();
+                    self.end_if_silent();
                 } else if let Some(current) = &mut self.current {
                     // Time spent paused must not count as a decoder stall.
                     let now = Instant::now();
@@ -273,6 +349,128 @@ impl EngineTask {
                     tracing::warn!(error = %e, "failed to set bitrate");
                 }
             }
+            Command::Speak(request) => {
+                if self.speech_queue.len() >= MAX_SPEECH_QUEUE {
+                    if let Some(dropped) = self.speech_queue.pop_front() {
+                        self.speech_finished(dropped.id, Some("too much speech queued".into()), true);
+                    }
+                }
+                self.speech_queue.push_back(request);
+            }
+            Command::StopSpeech => {
+                self.stop_speech();
+                self.end_if_silent();
+            }
+        }
+    }
+
+    /// Cancels the playing and all queued speech.
+    fn stop_speech(&mut self) {
+        for request in std::mem::take(&mut self.speech_queue) {
+            self.speech_finished(request.id, None, true);
+        }
+        if let Some(speech) = self.speech.take() {
+            self.speech_finished(speech.id, None, true);
+        }
+    }
+
+    fn speech_finished(&self, id: u64, error: Option<String>, stopped: bool) {
+        self.status.send_modify(|s| {
+            if s.speech == Some(id) {
+                s.speech = None;
+            }
+        });
+        let _ = self
+            .events
+            .send(EngineEvent::SpeechFinished { id, error, stopped });
+    }
+
+    /// Ends the transmission unless speech is still talking.
+    fn end_if_silent(&mut self) {
+        if self.speech.is_none() {
+            self.end_transmission();
+        }
+    }
+
+    /// Starts the next queued speech request if none plays.
+    fn next_speech(&mut self) {
+        while self.speech.is_none() {
+            let Some(request) = self.speech_queue.pop_front() else {
+                return;
+            };
+            match Decoder::spawn(&self.config.ffmpeg, &request.input, Duration::ZERO, None) {
+                Ok(decoder) => {
+                    let id = request.id;
+                    self.status.send_modify(|s| s.speech = Some(id));
+                    self.speech = Some(Speech {
+                        id,
+                        decoder,
+                        normalizer: Normalizer::new(
+                            self.config.target_lufs + SPEECH_LUFS_OFFSET,
+                            request.known_lufs,
+                        ),
+                        started: false,
+                        since: Instant::now(),
+                        last_frame: Instant::now(),
+                        ended_at: None,
+                    });
+                }
+                Err(e) => self.speech_finished(request.id, Some(format!("{e:#}")), false),
+            }
+        }
+    }
+
+    /// The next speech frame (`None` while buffering or when no speech plays).
+    fn speech_frame(&mut self) -> Option<crate::Frame> {
+        self.next_speech();
+        let speech = self.speech.as_mut()?;
+        if let Some(ended) = speech.ended_at {
+            let exit = speech.decoder.exit().cloned();
+            if exit.is_some() || ended.elapsed() > EXIT_TIMEOUT {
+                let error = exit
+                    .filter(|e| !e.success || !speech.started)
+                    .and_then(|e| e.error());
+                let id = speech.id;
+                self.speech = None;
+                self.speech_finished(id, error, false);
+            }
+            return None;
+        }
+        if !speech.started {
+            let ready = speech.decoder.buffered() >= SPEECH_PREROLL || speech.decoder.is_finished();
+            if !ready {
+                if speech.since.elapsed() > SPEECH_TIMEOUT {
+                    let id = speech.id;
+                    self.speech = None;
+                    self.speech_finished(id, Some("the speech did not start in time".into()), false);
+                }
+                return None;
+            }
+        }
+        match speech.decoder.try_next() {
+            Poll::Ready(Some(mut frame)) => {
+                if !speech.started {
+                    speech.started = true;
+                    let _ = self.events.send(EngineEvent::SpeechStarted { id: speech.id });
+                }
+                speech.last_frame = Instant::now();
+                speech.normalizer.process(&mut frame);
+                Some(frame)
+            }
+            Poll::Ready(None) => {
+                speech.ended_at = Some(Instant::now());
+                None
+            }
+            Poll::Pending if speech.started && speech.last_frame.elapsed() > SPEECH_STALL => {
+                let id = speech.id;
+                self.speech = None;
+                self.speech_finished(id, Some("the speech stalled".into()), false);
+                None
+            }
+            // A short gap in speech is filled with silence: the music goes on and the
+            // transmission does not end mid-sentence.
+            Poll::Pending if speech.started => Some(Box::new([0.0; james_core::audio::FRAME_LEN])),
+            Poll::Pending => None,
         }
     }
 
@@ -321,7 +519,7 @@ impl EngineTask {
                     s.position = Duration::ZERO;
                 });
                 self.emit_finished(request.id, Some(format!("{e:#}")), None, false);
-                self.end_transmission();
+                self.end_if_silent();
             }
         }
     }
@@ -354,7 +552,6 @@ impl EngineTask {
             };
             self.emit_finished(current.request.id, error, lufs, false);
             self.clear_status();
-            self.end_transmission();
         }
     }
 
@@ -425,10 +622,53 @@ impl EngineTask {
     fn tick(&mut self) {
         self.flush_end_marker();
         self.apply_seek();
-        if self.status.borrow().paused {
-            return;
+        let paused = self.status.borrow().paused;
+        let music = if paused { None } else { self.music_frame() };
+        let speech = self.speech_frame();
+        // The music is ducked while speech is audible (also during gaps in the speech); the
+        // ramp is linear in dB, so it sounds even.
+        let speaking = self.speech.as_ref().is_some_and(Speech::speaking);
+        let duck_target = if speaking { DUCK_DB } else { 0.0 };
+        let rate = if duck_target < self.duck_db {
+            DUCK_ATTACK_DB
+        } else {
+            DUCK_RELEASE_DB
+        };
+        self.duck_db += (duck_target - self.duck_db).clamp(-rate, rate);
+        let mut frame = match (music, speech) {
+            (None, None) => {
+                // Nothing to say this tick: listeners see the bot stop talking.
+                self.end_transmission();
+                return;
+            }
+            (Some(mut music), speech) => {
+                self.duck
+                    .process(&mut music, crate::dsp::db_to_gain(self.duck_db));
+                if let Some(speech) = speech {
+                    for (m, s) in music.iter_mut().zip(speech.iter()) {
+                        *m += s;
+                    }
+                }
+                music
+            }
+            (None, Some(speech)) => speech,
+        };
+        let volume = volume_to_gain(self.status.borrow().volume);
+        self.volume_ramp.process(&mut frame, volume);
+        self.limiter.process(&mut frame);
+        match self.encoder.encode(&frame) {
+            Ok(packet) => {
+                // A full queue means the adapter is not sending (e.g. reconnecting): drop.
+                let _ = self.audio.try_send(packet);
+                self.transmitting = true;
+            }
+            Err(e) => tracing::warn!(error = %e, "opus encoding failed"),
         }
-        let Some(current) = &mut self.current else { return };
+    }
+
+    /// The next normalised music frame, or `None` (nothing playing, buffering, ended).
+    fn music_frame(&mut self) -> Option<crate::Frame> {
+        let current = self.current.as_mut()?;
 
         if let Some(ended) = current.ended_at {
             // Output ended: decide success/failure from ffmpeg's exit.
@@ -446,7 +686,7 @@ impl EngineTask {
                 None if ended.elapsed() > EXIT_TIMEOUT => self.finish_ended(None),
                 None => {}
             }
-            return;
+            return None;
         }
 
         if let Some(since) = current.buffering_since {
@@ -467,7 +707,7 @@ impl EngineTask {
                 if current.last_frame.elapsed() > limit {
                     self.finish_ended(Some("the input stopped delivering audio".into()));
                 }
-                return;
+                return None;
             }
             current.buffering_since = None;
         }
@@ -477,9 +717,6 @@ impl EngineTask {
                 current.last_frame = Instant::now();
                 current.has_frame = true;
                 current.normalizer.process(&mut frame);
-                let volume = volume_to_gain(self.status.borrow().volume);
-                self.volume_ramp.process(&mut frame, volume);
-                self.limiter.process(&mut frame);
                 current.position += Duration::from_millis(FRAME_MS.into());
                 let position = current.position;
                 if !current.started {
@@ -489,21 +726,17 @@ impl EngineTask {
                     });
                 }
                 self.status.send_modify(|s| s.position = position);
-                match self.encoder.encode(&frame) {
-                    Ok(packet) => {
-                        // A full queue means the adapter is not sending (e.g. reconnecting): drop.
-                        let _ = self.audio.try_send(packet);
-                        self.transmitting = true;
-                    }
-                    Err(e) => tracing::warn!(error = %e, "opus encoding failed"),
-                }
+                Some(frame)
             }
-            Poll::Ready(None) => current.ended_at = Some(Instant::now()),
+            Poll::Ready(None) => {
+                current.ended_at = Some(Instant::now());
+                None
+            }
             Poll::Pending => {
                 // Underrun: rebuffer instead of stuttering frame by frame.
                 current.buffering_since = Some(Instant::now());
                 self.status.send_modify(|s| s.underruns += 1);
-                self.end_transmission();
+                None
             }
         }
     }
@@ -667,5 +900,180 @@ mod tests {
             measured_lufs, None,
             "a seeked playback must not update the loudness cache"
         );
+    }
+}
+
+#[cfg(test)]
+mod speech_tests {
+    use super::*;
+    use crate::decoder::tests::sine_file;
+
+    fn silence_file(dir: &std::path::Path, secs: u32) -> std::path::PathBuf {
+        let path = dir.join("silence.wav");
+        let status = std::process::Command::new("ffmpeg")
+            .args(["-hide_banner", "-loglevel", "error", "-f", "lavfi", "-i"])
+            .arg(format!("anullsrc=r=22050:cl=mono:d={secs}"))
+            .arg(&path)
+            .status()
+            .unwrap();
+        assert!(status.success());
+        path
+    }
+
+    fn engine() -> (
+        AudioEngine,
+        mpsc::Receiver<OpusFrame>,
+        mpsc::UnboundedReceiver<EngineEvent>,
+    ) {
+        let (audio_tx, audio_rx) = mpsc::channel(1024);
+        let (events_tx, events_rx) = mpsc::unbounded_channel();
+        let config = EngineConfig {
+            volume: 100,
+            ..Default::default()
+        };
+        (
+            AudioEngine::spawn(config, audio_tx, events_tx).unwrap(),
+            audio_rx,
+            events_rx,
+        )
+    }
+
+    fn rms(decoder: &mut audiopus::coder::Decoder, packet: &OpusFrame) -> f32 {
+        let mut out = vec![0f32; 5760 * 2];
+        let n = decoder
+            .decode_float(
+                Some(audiopus::packet::Packet::try_from(&packet.data[..]).unwrap()),
+                audiopus::MutSignals::try_from(&mut out[..]).unwrap(),
+                false,
+            )
+            .unwrap();
+        let samples = &out[..n * 2];
+        (samples.iter().map(|s| s * s).sum::<f32>() / samples.len() as f32).sqrt()
+    }
+
+    #[tokio::test]
+    async fn speech_plays_without_music() {
+        let dir = tempfile::tempdir().unwrap();
+        let (engine, mut audio, mut events) = engine();
+        engine.speak(SpeechRequest {
+            id: 1,
+            input: MediaInput::File(sine_file(dir.path(), 1)),
+            known_lufs: None,
+        });
+        assert_eq!(events.recv().await, Some(EngineEvent::SpeechStarted { id: 1 }));
+        assert_eq!(
+            events.recv().await,
+            Some(EngineEvent::SpeechFinished {
+                id: 1,
+                error: None,
+                stopped: false
+            })
+        );
+        let mut frames = 0;
+        loop {
+            let packet = tokio::time::timeout(Duration::from_secs(1), audio.recv())
+                .await
+                .unwrap()
+                .unwrap();
+            if packet.data.is_empty() {
+                break; // end of transmission after the speech
+            }
+            frames += 1;
+        }
+        assert!(
+            (45..=52).contains(&frames),
+            "about 1 s of speech, got {frames} frames"
+        );
+    }
+
+    #[tokio::test]
+    async fn music_is_ducked_and_keeps_playing_during_speech() {
+        let music_dir = tempfile::tempdir().unwrap();
+        let speech_dir = tempfile::tempdir().unwrap();
+        let (engine, mut audio, mut events) = engine();
+        engine.play(PlayRequest {
+            id: 7,
+            input: MediaInput::File(sine_file(music_dir.path(), 4)),
+            start: Duration::ZERO,
+            known_lufs: None,
+        });
+        assert_eq!(events.recv().await, Some(EngineEvent::Started { id: 7 }));
+        let mut decoder =
+            audiopus::coder::Decoder::new(audiopus::SampleRate::Hz48000, audiopus::Channels::Stereo).unwrap();
+        // Music alone for ~1 s.
+        let mut before = Vec::new();
+        for _ in 0..50 {
+            let packet = audio.recv().await.unwrap();
+            before.push(rms(&mut decoder, &packet));
+        }
+        // Silent "speech": only the ducking changes the level.
+        engine.speak(SpeechRequest {
+            id: 2,
+            input: MediaInput::File(silence_file(speech_dir.path(), 1)),
+            known_lufs: None,
+        });
+        let mut during = Vec::new();
+        let mut speaking = false;
+        loop {
+            tokio::select! {
+                packet = audio.recv() => {
+                    let packet = packet.unwrap();
+                    assert!(!packet.data.is_empty(), "no gap in the transmission during speech");
+                    if speaking {
+                        during.push(rms(&mut decoder, &packet));
+                    } else {
+                        rms(&mut decoder, &packet);
+                    }
+                }
+                event = events.recv() => match event.unwrap() {
+                    EngineEvent::SpeechStarted { id: 2 } => speaking = true,
+                    EngineEvent::SpeechFinished { id: 2, error, .. } => {
+                        assert_eq!(error, None);
+                        break;
+                    }
+                    other => panic!("unexpected {other:?}"),
+                },
+            }
+        }
+        let level = |v: &[f32]| v[v.len() / 2..].iter().sum::<f32>() / (v.len() / 2) as f32;
+        let ratio = level(&during) / level(&before[25..]);
+        assert!(
+            (0.15..0.3).contains(&ratio),
+            "music ducked to about -14 dB, ratio {ratio}"
+        );
+        // The music goes on afterwards.
+        let EngineEvent::Finished {
+            id: 7,
+            stopped: false,
+            error: None,
+            ..
+        } = events.recv().await.unwrap()
+        else {
+            panic!("the music should finish normally");
+        };
+    }
+
+    #[tokio::test]
+    async fn stopping_speech_cancels_the_queue() {
+        let dir = tempfile::tempdir().unwrap();
+        let (engine, _audio, mut events) = engine();
+        let file = sine_file(dir.path(), 3);
+        for id in [1, 2] {
+            engine.speak(SpeechRequest {
+                id,
+                input: MediaInput::File(file.clone()),
+                known_lufs: None,
+            });
+        }
+        assert_eq!(events.recv().await, Some(EngineEvent::SpeechStarted { id: 1 }));
+        engine.stop_speech();
+        let mut finished = Vec::new();
+        for _ in 0..2 {
+            if let Some(EngineEvent::SpeechFinished { id, stopped, .. }) = events.recv().await {
+                finished.push((id, stopped));
+            }
+        }
+        finished.sort();
+        assert_eq!(finished, [(1, true), (2, true)]);
     }
 }

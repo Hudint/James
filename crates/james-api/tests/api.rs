@@ -40,6 +40,7 @@ impl LibraryService for FakeLibrary {
 
 struct Api {
     app: axum::Router,
+    setup_token: Arc<Mutex<Option<String>>>,
     db: Db,
     manager: Arc<InstanceManager>,
     library: Arc<FakeLibrary>,
@@ -50,10 +51,15 @@ struct Response {
     status: StatusCode,
     body: Value,
     cookie: Option<String>,
+    location: Option<String>,
 }
 
 impl Api {
     async fn new() -> Self {
+        Self::with_oidc(None).await
+    }
+
+    async fn with_oidc(oidc: Option<Arc<james_api::oidc::Oidc>>) -> Self {
         let db = Db::memory().await.unwrap();
         let services = Services::new(
             SourceRegistry::default(),
@@ -68,8 +74,9 @@ impl Api {
             indexed: Mutex::new(Vec::new()),
         });
         let manager = Arc::new(InstanceManager::new(services));
+        let setup_token = Arc::new(Mutex::new(Some("SETUPTOKEN".into())));
         let state = AppState {
-            setup_token: Arc::new(Mutex::new(Some("SETUPTOKEN".into()))),
+            setup_token: setup_token.clone(),
             db: db.clone(),
             manager: manager.clone(),
             links: LinkCodes::default(),
@@ -82,9 +89,11 @@ impl Api {
             ws_revalidate: Duration::from_millis(200),
             plugins: None,
             plugin_tokens: Default::default(),
+            oidc,
         };
         Self {
             app: james_api::router(state),
+            setup_token,
             db,
             manager,
             library,
@@ -107,11 +116,17 @@ impl Api {
             .and_then(|v| v.to_str().ok())
             .and_then(|v| v.split(';').next())
             .map(str::to_owned);
+        let location = response
+            .headers()
+            .get(header::LOCATION)
+            .and_then(|v| v.to_str().ok())
+            .map(str::to_owned);
         let bytes = response.into_body().collect().await.unwrap().to_bytes();
         Response {
             status,
             body: serde_json::from_slice(&bytes).unwrap_or(Value::Null),
             cookie,
+            location,
         }
     }
 
@@ -719,6 +734,7 @@ async fn unknown_hosts_are_refused_when_configured() {
         ws_revalidate: Duration::from_secs(30),
         plugins: None,
         plugin_tokens: Default::default(),
+        oidc: None,
     };
     let app = james_api::app(state, None);
     let get = |host: &str| {
@@ -728,6 +744,28 @@ async fn unknown_hosts_are_refused_when_configured() {
             .body(Body::empty())
             .unwrap()
     };
+    let health = Request::builder()
+        .uri("/api/v1/health")
+        .header(header::HOST, "127.0.0.1:8087")
+        .body(Body::empty())
+        .unwrap();
+    assert_eq!(
+        app.clone().oneshot(health).await.unwrap().status(),
+        StatusCode::OK,
+        "container health checks work with any host"
+    );
+    for path in ["/api/v1/healthx", "/api/v1/health/", "/api/v1/health/../setup"] {
+        let request = Request::builder()
+            .uri(path)
+            .header(header::HOST, "rebind.attacker.example")
+            .body(Body::empty())
+            .unwrap();
+        assert_eq!(
+            app.clone().oneshot(request).await.unwrap().status(),
+            StatusCode::MISDIRECTED_REQUEST,
+            "{path}: only the health check itself is exempt"
+        );
+    }
     assert_eq!(
         app.clone().oneshot(get("bot.example")).await.unwrap().status(),
         StatusCode::OK
@@ -748,4 +786,215 @@ async fn unknown_hosts_are_refused_when_configured() {
             .status(),
         StatusCode::MISDIRECTED_REQUEST
     );
+}
+
+#[tokio::test]
+async fn speech_checks_permissions_and_the_instance() {
+    let api = Api::new().await;
+    let (_, nobody) = api.user_with_grants("nobody", &[]).await;
+    let (_, dj) = api.user_with_grants("dj", &[Grant::global("tts.say")]).await;
+    for path in ["/instances/music/say", "/instances/music/say/stop"] {
+        let r = api
+            .call(Method::POST, path, Some(&nobody), Some(json!({"text": "hi"})))
+            .await;
+        assert_eq!(r.status, StatusCode::FORBIDDEN, "{path}");
+        let r = api
+            .call(Method::POST, path, Some(&dj), Some(json!({"text": "hi"})))
+            .await;
+        assert_eq!(r.status, StatusCode::CONFLICT, "{path}: not running");
+    }
+    let r = api.call(Method::GET, "/tts/voices", Some(&nobody), None).await;
+    assert_eq!((r.status, r.body), (StatusCode::OK, json!([])));
+}
+
+#[tokio::test]
+async fn only_admins_link_sso_identities() {
+    let api = Api::new().await;
+    api.db
+        .create_user("root", Some("root-password"), true)
+        .await
+        .unwrap();
+    let admin = api.login("root", "root-password").await;
+    let (_, manager) = api
+        .user_with_grants("manager", &[Grant::global("users.manage")])
+        .await;
+    let target = api.db.create_user("target", None, false).await.unwrap();
+    let other = api.db.create_user("other", None, false).await.unwrap();
+    let path = format!("/users/{}", target.id);
+    let link = json!({"oidcSubject": "https://idp#alice"});
+    let r = api
+        .call(Method::PATCH, &path, Some(&manager), Some(link.clone()))
+        .await;
+    assert_eq!(r.status, StatusCode::FORBIDDEN);
+    let r = api
+        .call(Method::PATCH, &path, Some(&admin), Some(link.clone()))
+        .await;
+    assert_eq!(r.status, StatusCode::OK, "{}", r.body);
+    let r = api
+        .call(
+            Method::PATCH,
+            &format!("/users/{}", other.id),
+            Some(&admin),
+            Some(link),
+        )
+        .await;
+    assert_eq!(r.status, StatusCode::CONFLICT, "one account per identity");
+    assert_eq!(
+        api.db.user(other.id).await.unwrap().oidc_subject,
+        None,
+        "nothing changed"
+    );
+}
+
+#[tokio::test]
+async fn sso_accounts_cannot_set_a_password_themselves() {
+    let api = Api::new().await;
+    let user = api
+        .db
+        .create_oidc_user("alice", "https://idp#alice", &[])
+        .await
+        .unwrap();
+    let token = api
+        .db
+        .create_token(user.id, james_db::tokens::TokenKind::Api, "test", None)
+        .await
+        .unwrap();
+    let r = api
+        .call(
+            Method::POST,
+            "/me/password",
+            Some(&token),
+            Some(json!({"newPassword": "a-new-password"})),
+        )
+        .await;
+    assert_eq!(r.status, StatusCode::FORBIDDEN);
+}
+
+#[tokio::test]
+async fn sso_accounts_get_expiring_tokens_only() {
+    let api = Api::new().await;
+    let user = api
+        .db
+        .create_oidc_user("alice", "https://idp#alice", &[])
+        .await
+        .unwrap();
+    let api_token = api
+        .db
+        .create_token(user.id, james_db::tokens::TokenKind::Api, "test", Some(3600))
+        .await
+        .unwrap();
+    let r = api
+        .call(
+            Method::POST,
+            "/me/tokens",
+            Some(&api_token),
+            Some(json!({"name": "renewed", "days": 30})),
+        )
+        .await;
+    assert_eq!(
+        r.status,
+        StatusCode::FORBIDDEN,
+        "an API token cannot renew itself"
+    );
+    let session = api
+        .db
+        .create_token(user.id, james_db::tokens::TokenKind::Session, "", Some(3600))
+        .await
+        .unwrap();
+    let token = format!("james_session={session}");
+    for (days, status) in [
+        (None, StatusCode::BAD_REQUEST),
+        (Some(31), StatusCode::BAD_REQUEST),
+        (Some(30), StatusCode::OK),
+    ] {
+        let r = api
+            .call(
+                Method::POST,
+                "/me/tokens",
+                Some(&token),
+                Some(json!({"name": "ci", "days": days})),
+            )
+            .await;
+        assert_eq!(r.status, status, "{days:?}: {}", r.body);
+    }
+}
+
+#[tokio::test]
+async fn relinking_sso_ends_the_sessions() {
+    let api = Api::new().await;
+    api.db
+        .create_user("root", Some("root-password"), true)
+        .await
+        .unwrap();
+    let admin = api.login("root", "root-password").await;
+    let user = api
+        .db
+        .create_oidc_user("alice", "https://idp#alice", &[])
+        .await
+        .unwrap();
+    let token = api
+        .db
+        .create_token(user.id, james_db::tokens::TokenKind::Api, "test", Some(3600))
+        .await
+        .unwrap();
+    assert_eq!(
+        api.call(Method::GET, "/me", Some(&token), None).await.status,
+        StatusCode::OK
+    );
+    let r = api
+        .call(
+            Method::PATCH,
+            &format!("/users/{}", user.id),
+            Some(&admin),
+            Some(json!({"oidcSubject": ""})),
+        )
+        .await;
+    assert_eq!(r.status, StatusCode::OK, "{}", r.body);
+    assert_eq!(
+        api.call(Method::GET, "/me", Some(&token), None).await.status,
+        StatusCode::UNAUTHORIZED
+    );
+}
+
+#[tokio::test]
+async fn sso_failures_redirect_with_fixed_codes() {
+    let oidc = james_api::oidc::Oidc::new(james_api::oidc::OidcConfig {
+        enabled: true,
+        issuer: "https://idp.invalid".into(),
+        client_id: "james".into(),
+        redirect_url: "https://james.example/api/v1/auth/oidc/callback".into(),
+        create_users: true,
+        ..Default::default()
+    })
+    .unwrap();
+    let api = Api::with_oidc(Some(oidc)).await;
+    let callback = |query: &str| {
+        let api = &api;
+        let query = query.to_owned();
+        async move {
+            api.call(Method::GET, &format!("/auth/oidc/callback?{query}"), None, None)
+                .await
+                .location
+                .unwrap_or_default()
+        }
+    };
+    assert_eq!(
+        callback("code=c&state=s").await,
+        "/login?error=setup",
+        "no SSO accounts before the administrator exists"
+    );
+    *api.setup_token.lock() = None;
+    assert_eq!(
+        callback("code=c&state=s").await,
+        "/login?error=expired",
+        "no login cookie"
+    );
+    assert_eq!(
+        callback("error=x%0D%0A2026%20INFO%20forged").await,
+        "/login?error=denied",
+        "provider text never reaches the page"
+    );
+    assert_eq!(callback("").await, "/login?error=failed");
+    let r = api.call(Method::GET, "/auth/providers", None, None).await;
+    assert_eq!(r.body["oidc"]["name"], "SSO");
 }

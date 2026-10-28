@@ -16,6 +16,11 @@ registerPlugin({
 
   event.on('chat', function (ev) {
     if (ev.client.isSelf()) return;
+    if (ev.text.indexOf('say ') === 0) {
+      require('audio').setTTSDefaultLocale('en');
+      require('audio').say(ev.text.slice(4));
+      return;
+    }
     if (ev.text === 'playlists') {
       ev.client.chat('playlists: ' + media.getPlaylists().map(function (p) { return p.name(); }).join(','));
       return;

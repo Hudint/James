@@ -7,6 +7,7 @@
 pub mod auth;
 pub mod error;
 pub mod linking;
+pub mod oidc;
 pub mod plugin_tokens;
 mod routes;
 pub mod security;
@@ -58,6 +59,8 @@ pub struct AppState {
     pub plugins: Option<Arc<james_plugins::PluginManager>>,
     /// Tokens of plugin pages.
     pub plugin_tokens: plugin_tokens::PluginTokens,
+    /// Single sign-on (`None` when not configured).
+    pub oidc: Option<Arc<oidc::Oidc>>,
 }
 
 /// Builds the complete application router (API + optional static web UI).

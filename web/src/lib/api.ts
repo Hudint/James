@@ -11,6 +11,7 @@ import type {
   Playlist,
   PluginInfo,
   PluginOverview,
+  TtsVoice,
   QueueItem,
   RepeatMode,
   Role,
@@ -68,6 +69,7 @@ export const api = {
   login: (username: string, password: string) =>
     request<{ user: User }>('POST', '/auth/login', { username, password }),
   logout: () => request<void>('POST', '/auth/logout'),
+  providers: () => request<{ oidc: { name: string } | null }>('GET', '/auth/providers'),
   me: () => request<Me>('GET', '/me'),
   changePassword: (currentPassword: string | null, newPassword: string) =>
     request<void>('POST', '/me/password', { currentPassword, newPassword }),
@@ -137,6 +139,9 @@ export const api = {
   playPlaylist: (id: number, instance: string, mode: PlayMode) =>
     request<QueueItem[]>('POST', `/playlists/${id}/play`, { instance, mode }),
 
+  voices: () => request<TtsVoice[]>('GET', '/tts/voices'),
+  say: (id: string, text: string) => request<{ id: number }>('POST', `/instances/${enc(id)}/say`, { text }),
+  stopSpeech: (id: string) => request<void>('POST', `/instances/${enc(id)}/say/stop`),
   plugins: () => request<PluginOverview>('GET', '/plugins'),
   reloadPlugins: () => request<void>('POST', '/plugins/reload'),
   configurePlugin: (id: string, body: { enabled: boolean; permissions: string[]; instances: string[] | null }) =>

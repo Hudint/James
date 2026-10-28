@@ -83,6 +83,11 @@ function handle(event: ServerEvent) {
     case 'queueChanged':
       refreshQueue(id);
       break;
+    case 'speechStarted':
+    case 'speechEnded':
+      void refreshStatus(id);
+      if (event.type === 'speechEnded' && event.error) toast(t('speak.failed', { error: event.error }), 'error');
+      break;
     case 'connected':
       entry(id).snapshot = event.snapshot;
       void refreshStatus(id);

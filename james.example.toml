@@ -20,3 +20,30 @@ node = "node"
 host = "plugin-host/src/main.ts"
 # Plugin directory; default: <data_dir>/plugins
 # dir = "plugins"
+
+# Text to speech with Piper (https://github.com/OHF-Voice/piper1-gpl). Voices are
+# `<name>.onnx` + `<name>.onnx.json` files in the voices directory, e.g. from
+#   python -m piper.download_voices --download-dir data/voices de_DE-thorsten-medium
+[tts]
+enabled = true
+# default_voice = "de_DE-thorsten-medium"
+[tts.piper]
+# Python with the `piper-tts` package installed
+python = "python3"
+# relative to data_dir
+voices_dir = "voices"
+max_workers = 3
+idle_timeout_secs = 600
+
+# Single sign-on (OpenID Connect), see docs/sso.md.
+# [auth.oidc]
+# enabled = true
+# issuer = "https://auth.example.com/realms/main"
+# client_id = "james"
+# client_secret = "…"
+# redirect_url = "https://james.example.com/api/v1/auth/oidc/callback"
+# display_name = "Keycloak"
+# create_users = true
+# allowed_groups = ["james-users"]
+# default_roles = ["dj"]
+# admin_groups = ["james-admins"]

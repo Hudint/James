@@ -18,6 +18,7 @@ axum = { version = "0.8", features = ["ws", "multipart", "macros"] }
 axum-extra = { version = "0.12", features = ["cookie"] }
 futures.workspace = true
 parking_lot = "0.12"
+base64 = "0.22"
 rand = "0.9"
 serde.workspace = true
 serde_json.workspace = true
@@ -27,6 +28,11 @@ tokio.workspace = true
 tower = { version = "0.5", features = ["util"] }
 tower-http = { version = "0.6", features = ["trace", "fs", "limit"] }
 tracing.workspace = true
+
+openidconnect = { version = "4", default-features = false }
+reqwest = { version = "0.13", default-features = false, features = ["default-tls"] }
+http = "1"
+url = "2"
 
 [dev-dependencies]
 tokio-tungstenite = "0.30"

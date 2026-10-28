@@ -10,3 +10,4 @@ pub mod platform;
 pub mod process;
 pub mod source;
 pub mod text;
+pub mod tts;

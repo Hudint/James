@@ -110,6 +110,15 @@ fn map(row: sqlx::sqlite::SqliteRow) -> Result<User> {
     })
 }
 
+/// What a login was checked against; a session is only created while it still holds.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Proof {
+    /// The password hash the password was verified with.
+    Password(String),
+    /// The single sign-on subject the account was found by.
+    Oidc(String),
+}
+
 impl Db {
     pub async fn create_user(&self, username: &str, password: Option<&str>, is_admin: bool) -> Result<User> {
         let username = username.trim();
@@ -129,6 +138,54 @@ impl Db {
         .map_err(conflict)?
         .last_insert_rowid();
         self.user(id).await
+    }
+
+    /// Creates an account for a single sign-on identity with its roles, all or nothing.
+    /// [`DbError::Conflict`] if the name or the subject is taken.
+    pub async fn create_oidc_user(&self, username: &str, subject: &str, roles: &[String]) -> Result<User> {
+        let username = username.trim();
+        if username.is_empty() || username.len() > 64 {
+            return Err(DbError::Invalid("username must be 1-64 characters".into()));
+        }
+        let mut tx = self.pool().begin().await?;
+        let id = sqlx::query(
+            "INSERT INTO users (username, password_hash, is_admin, created_at, oidc_subject) VALUES (?, NULL, 0, ?, ?)",
+        )
+        .bind(username)
+        .bind(now())
+        .bind(subject)
+        .execute(&mut *tx)
+        .await
+        .map_err(conflict)?
+        .last_insert_rowid();
+        for role in roles {
+            let inserted = sqlx::query(
+                "INSERT INTO user_roles (user_id, role_id) SELECT ?, id FROM roles WHERE name = ?",
+            )
+            .bind(id)
+            .bind(role)
+            .execute(&mut *tx)
+            .await?;
+            if inserted.rows_affected() == 0 {
+                return Err(DbError::Invalid(format!("unknown role '{role}'")));
+            }
+        }
+        tx.commit().await?;
+        self.user(id).await
+    }
+
+    /// Removes administrator rights unless the account is the last enabled administrator
+    /// (atomic); `false` if it was kept.
+    pub async fn demote_admin(&self, id: i64) -> Result<bool> {
+        let result = sqlx::query(
+            "UPDATE users SET is_admin = 0 WHERE id = ? AND is_admin = 1 \
+             AND (SELECT COUNT(*) FROM users WHERE is_admin = 1 AND disabled = 0 AND id != ?) > 0",
+        )
+        .bind(id)
+        .bind(id)
+        .execute(self.pool())
+        .await?;
+        Ok(result.rows_affected() == 1)
     }
 
     /// Creates the first administrator, atomically failing with [`DbError::Conflict`] if any
@@ -199,6 +256,15 @@ impl Db {
 
     /// Checks username and password; disabled users and users without a password never match.
     pub async fn authenticate(&self, username: &str, password: &str) -> Result<Option<User>> {
+        Ok(self
+            .password_login(username, password)
+            .await?
+            .map(|(user, _)| user))
+    }
+
+    /// Checks a password login; also returns the proof for [`Db::create_session`], so a
+    /// password changed during the (slow) check does not yield a session.
+    pub async fn password_login(&self, username: &str, password: &str) -> Result<Option<(User, Proof)>> {
         let row: Option<(i64, Option<String>, bool)> =
             sqlx::query_as("SELECT id, password_hash, disabled FROM users WHERE username = ?")
                 .bind(username.trim())
@@ -206,8 +272,8 @@ impl Db {
                 .await?;
         match row {
             Some((id, Some(hash), false)) => {
-                if verify_async(hash, password).await? {
-                    Ok(Some(self.user(id).await?))
+                if verify_async(hash.clone(), password).await? {
+                    Ok(Some((self.user(id).await?, Proof::Password(hash))))
                 } else {
                     Ok(None)
                 }
@@ -348,6 +414,70 @@ impl Db {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn no_session_after_the_credentials_changed() {
+        let db = Db::memory().await.unwrap();
+        let user = db
+            .create_user("alice", Some("old-password"), false)
+            .await
+            .unwrap();
+        let (_, proof) = db.password_login("alice", "old-password").await.unwrap().unwrap();
+        assert!(db.create_session(user.id, &proof, 60).await.unwrap().is_some());
+        // The password is reset while a login is being checked.
+        db.set_password(user.id, Some("new-password")).await.unwrap();
+        assert_eq!(db.create_session(user.id, &proof, 60).await.unwrap(), None);
+        let oidc = db.create_oidc_user("bob", "https://idp#bob", &[]).await.unwrap();
+        let proof = Proof::Oidc("https://idp#bob".into());
+        assert!(db.create_session(oidc.id, &proof, 60).await.unwrap().is_some());
+        db.set_oidc_subject(oidc.id, None).await.unwrap();
+        assert_eq!(
+            db.create_session(oidc.id, &proof, 60).await.unwrap(),
+            None,
+            "unlinked"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_last_admin_is_never_demoted() {
+        let db = Db::memory().await.unwrap();
+        let a = db.create_user("a", None, true).await.unwrap();
+        let b = db.create_user("b", None, true).await.unwrap();
+        assert!(db.demote_admin(a.id).await.unwrap());
+        assert!(
+            !db.demote_admin(b.id).await.unwrap(),
+            "b is the last administrator"
+        );
+        assert!(db.user(b.id).await.unwrap().is_admin);
+        // A disabled administrator does not count.
+        let c = db.create_user("c", None, true).await.unwrap();
+        db.set_disabled(c.id, true).await.unwrap();
+        assert!(!db.demote_admin(b.id).await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn sso_accounts_are_created_with_roles_or_not_at_all() {
+        let db = Db::memory().await.unwrap();
+        let user = db
+            .create_oidc_user("alice", "https://idp#1", &["dj".into()])
+            .await
+            .unwrap();
+        assert_eq!(user.oidc_subject.as_deref(), Some("https://idp#1"));
+        assert!(!user.has_password);
+        assert!(matches!(
+            db.create_oidc_user("alice2", "https://idp#1", &[]).await,
+            Err(DbError::Conflict)
+        ));
+        assert!(matches!(
+            db.create_oidc_user("bob", "https://idp#2", &["nope".into()])
+                .await,
+            Err(DbError::Invalid(_))
+        ));
+        assert!(
+            matches!(db.user_by_oidc("https://idp#2").await, Err(DbError::NotFound)),
+            "nothing is left of a failed creation"
+        );
+    }
 
     #[tokio::test]
     async fn create_authenticate_and_roles() {

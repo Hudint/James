@@ -1,6 +1,8 @@
 <script lang="ts">
+  import { onMount } from 'svelte';
+  import { api } from '$lib/api';
   import { i18n, t } from '$lib/i18n/index.svelte';
-  import type { InstanceConfig } from '$lib/types';
+  import type { InstanceConfig, TtsVoice } from '$lib/types';
 
   let {
     config = $bindable(),
@@ -18,6 +20,27 @@
 
   const idPattern = '[a-z0-9_-]{1,32}';
   let bitrateKbps = $derived(config.audio.bitrate ? String(config.audio.bitrate / 1000) : '');
+
+  /** `null` until loaded. */
+  let voices = $state<TtsVoice[] | null>(null);
+  onMount(() => {
+    api.voices().then((v) => (voices = v), () => (voices = []));
+  });
+  /** Voices grouped by language, sorted. */
+  let voiceGroups = $derived(
+    Object.entries(
+      (voices ?? []).reduce<Record<string, TtsVoice[]>>((groups, voice) => {
+        (groups[voice.language] ??= []).push(voice);
+        return groups;
+      }, {}),
+    )
+      .sort(([a], [b]) => a.localeCompare(b))
+      .map(([language, list]) => [language, list.sort((a, b) => a.name.localeCompare(b.name))] as const),
+  );
+  /** The saved voice is no longer installed. */
+  let voiceMissing = $derived(
+    voices !== null && config.tts_voice !== null && !voices.some((v) => v.id === config.tts_voice),
+  );
 
   function submit(event: SubmitEvent) {
     event.preventDefault();
@@ -107,6 +130,25 @@
         <label for="cfg-prefix">{t('config.prefix')}</label>
         <input id="cfg-prefix" class="prefix" type="text" required maxlength="5" pattern="\S{'{1,5}'}" bind:value={config.command_prefix} />
       </div>
+      {#if voices !== null}
+        <div class="field">
+          <label for="cfg-voice">{t('config.voice')}</label>
+          {#if voices.length || voiceMissing}
+            <select id="cfg-voice" value={config.tts_voice ?? ''} onchange={(e) => (config.tts_voice = e.currentTarget.value || null)} aria-describedby="cfg-voice-hint">
+              <option value="">{t('config.voiceDefault')}</option>
+              {#if voiceMissing}<option value={config.tts_voice} disabled>{t('config.voiceMissing', { id: config.tts_voice ?? '' })}</option>{/if}
+              {#each voiceGroups as [language, list] (language)}
+                <optgroup label={language}>
+                  {#each list as voice (voice.id)}<option value={voice.id}>{voice.name}</option>{/each}
+                </optgroup>
+              {/each}
+            </select>
+            <span id="cfg-voice-hint" class="hint">{t('config.voiceHint')}</span>
+          {:else}
+            <span class="hint">{t('config.voiceNone')}</span>
+          {/if}
+        </div>
+      {/if}
     </div>
     <label class="checkbox"><input type="checkbox" bind:checked={config.now_playing_description} />{t('config.description')}</label>
     <label class="checkbox"><input type="checkbox" bind:checked={config.autostart} />{t('config.autostart')}</label>

@@ -1,0 +1,76 @@
+name: Docker
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+  # Weekly rebuild of the latest release: picks up yt-dlp updates (YouTube changes often).
+  schedule:
+    - cron: '0 4 * * 1'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  # Pull requests: build only, without access to the registry.
+  build:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: false
+          cache-from: type=gha
+
+  publish:
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Check out the latest release (scheduled rebuild)
+        if: github.event_name == 'schedule'
+        id: release
+        run: |
+          tag=$(git tag --list 'v*' --sort=-v:refname | head -n1)
+          if [ -z "$tag" ]; then echo "no release yet"; echo "skip=true" >> "$GITHUB_OUTPUT"; exit 0; fi
+          git checkout "$tag"
+          echo "version=${tag#v}" >> "$GITHUB_OUTPUT"
+      - uses: docker/metadata-action@v5
+        id: meta
+        with:
+          images: ghcr.io/${{ github.repository_owner }}/james
+          tags: |
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=raw,value=latest,enable=${{ startsWith(github.ref, 'refs/tags/v') || (github.event_name == 'schedule' && steps.release.outputs.version != '') }}
+            type=raw,value=${{ steps.release.outputs.version }},enable=${{ github.event_name == 'schedule' && steps.release.outputs.version != '' }}
+            type=edge,branch=main,enable=${{ github.event_name != 'schedule' }}
+      - uses: docker/setup-buildx-action@v3
+        if: steps.release.outputs.skip != 'true'
+      - uses: docker/login-action@v3
+        if: steps.release.outputs.skip != 'true'
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - uses: docker/build-push-action@v6
+        if: steps.release.outputs.skip != 'true'
+        with:
+          context: .
+          push: true
+          # The weekly rebuild must fetch the newest yt-dlp, not reuse the cached layer.
+          no-cache: ${{ github.event_name == 'schedule' }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max

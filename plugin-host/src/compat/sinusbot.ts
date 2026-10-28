@@ -507,10 +507,11 @@ function modules(ctx: Context, bot: Bot, rt: Runtime, scriptModule: { exports: u
       return true;
     },
     isPlaying: () => !!bot.player.current && !bot.player.status.paused,
-    say: () => unsupported(ctx, 'audio.say (text to speech arrives with TTS support)'),
+    say: (text: string, locale?: string) =>
+      void fire(ctx, 'say', bot.say(String(text), { language: locale ?? ctx.extra.ttsLocale ?? undefined })),
     setStreamVolume: () => unsupported(ctx, 'per-stream volume'),
-    setTTSURL: () => unsupported(ctx, 'audio.setTTSURL'),
-    setTTSDefaultLocale: () => unsupported(ctx, 'audio.setTTSDefaultLocale'),
+    setTTSURL: () => unsupported(ctx, 'audio.setTTSURL (James uses its own voices)'),
+    setTTSDefaultLocale: (locale: string) => ((ctx.extra.ttsLocale = String(locale)), true),
   };
 
   const teamspeak = ctx.platform === 'teamspeak';

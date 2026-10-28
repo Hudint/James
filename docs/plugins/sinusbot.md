@@ -37,7 +37,8 @@ the same [permissions](README.md#permissions) as native plugins.
   a warning the first time a script calls them.
 - **Avatars, banners (`graphics`), recording, Icecast streaming, audio filters, idle/startup
   tracks, subscription mode** are not available.
-- **`audio.say` (text to speech)** arrives with James' TTS support.
+- **`audio.say(text, locale)`** speaks with James' voices: the locale (or the one set with
+  `audio.setTTSDefaultLocale`) picks the best installed voice; `audio.setTTSURL` is not supported.
 - **Positions** (`audio.getTrackPosition`, `audio.seek`) are in milliseconds.
 - **Track ids** are `<source>:<locator>`. `media.getTrackByID` and `media.search` work on the local
   library; `track.url()` returns something `media.playURL` accepts.
@@ -109,7 +110,7 @@ Legend: ✓ supported · ◐ supported with the noted difference · ✗ not supp
 | `store` | all 15 functions (script, instance and global scope) | |
 | `backend` | all 26 functions; `connect`/`disconnect` need `instances` | `extended()` returns the TeamSpeak extension |
 | `media` | `playURL`, `getCurrentTrack`, `getTrackByID` ◐, `getTracks` ◐ (first 200), `search` ◐ (library), `enqueue`, `playAsNext`, `playNext`, `playPrevious`, `stop`, `getQueue`, `getPlaylists`, `getPlaylistByID`, `removeFromQueue`, `clearQueue`, `clearPlaylist`, `yt`, `ytStream`, `ytdl`, `enqueueYt`, `enqueueYtdl`, `playQueueNext`, `resumeQueue`, `playlistPlayByID` | ◐ `getActivePlaylist` returns undefined; ✗ idle and startup tracks |
-| `audio` | `isRepeat`, `setRepeat`, `isShuffle`, `setShuffle`, `getVolume`, `setVolume`, `getTrackPosition`, `seek`, `isMute`, `setMute` ◐, `isPlaying`, `getAudioReturnChannel` | ✗ `setAudioFilter`, `setAudioReturnChannel`, recording, `streamToServer`, `stopStream`, `say` (TTS pending), `setStreamVolume`, `setTTSURL`, `setTTSDefaultLocale` |
+| `audio` | `isRepeat`, `setRepeat`, `isShuffle`, `setShuffle`, `getVolume`, `setVolume`, `getTrackPosition`, `seek`, `isMute`, `setMute` ◐, `isPlaying`, `getAudioReturnChannel`, `say` ◐ (James' voices), `setTTSDefaultLocale` | ✗ `setAudioFilter`, `setAudioReturnChannel`, recording, `streamToServer`, `stopStream`, `setStreamVolume`, `setTTSURL` |
 | `format` | all 5 (`code` uses `[noparse]` on TeamSpeak) | |
 | `helpers` | all 16 | |
 | `event` | `on`, `emit`, `broadcast` | |

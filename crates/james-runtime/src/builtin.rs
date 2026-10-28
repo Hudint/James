@@ -21,6 +21,7 @@ pub mod permissions {
     pub const CONTROL: &str = "playback.control";
     pub const QUEUE: &str = "queue.manage";
     pub const VOLUME: &str = "playback.volume";
+    pub const SAY: &str = "tts.say";
 }
 
 struct Builtin {
@@ -88,6 +89,22 @@ pub fn register(registry: &CommandRegistry) {
             description: "Queues tracks to play next",
             permission: Some(PLAY),
             handler: playnext,
+        },
+        Builtin {
+            name: "say",
+            aliases: &["tts"],
+            usage: "<text>",
+            description: "Speaks the text (over the music)",
+            permission: Some(SAY),
+            handler: say,
+        },
+        Builtin {
+            name: "hush",
+            aliases: &["shutup"],
+            usage: "",
+            description: "Stops the speech",
+            permission: Some(SAY),
+            handler: hush,
         },
         Builtin {
             name: "skip",
@@ -263,6 +280,21 @@ fn require_args(ctx: &CommandContext) -> anyhow::Result<&str> {
         bail!("missing argument");
     }
     Ok(&ctx.args)
+}
+
+fn say(ctx: &CommandContext) -> Output<'_> {
+    Box::pin(async move {
+        let text = require_args(ctx)?;
+        ctx.instance.say(text, None, None).await?;
+        Ok(None)
+    })
+}
+
+fn hush(ctx: &CommandContext) -> Output<'_> {
+    Box::pin(async move {
+        ctx.instance.stop_speech()?;
+        Ok(None)
+    })
 }
 
 fn help(ctx: &CommandContext) -> Output<'_> {

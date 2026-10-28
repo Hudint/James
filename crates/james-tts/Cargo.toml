@@ -1,0 +1,23 @@
+[package]
+name = "james-tts"
+description = "Text-to-speech providers of James (Piper)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+james-core.workspace = true
+anyhow.workspace = true
+async-trait.workspace = true
+ebur128 = "0.1"
+parking_lot = "0.12"
+rand = "0.9"
+serde.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+tempfile = "3"
