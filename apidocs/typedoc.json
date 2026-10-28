@@ -1,0 +1,32 @@
+{
+  "$schema": "https://typedoc.org/schema.json",
+  "name": "James Plugin API",
+  "entryPoints": [
+    ".build/Plugin API.d.ts"
+  ],
+  "tsconfig": "tsconfig.json",
+  "readme": "home.md",
+  "projectDocuments": [
+    ".build/README.md",
+    ".build/sinusbot.md"
+  ],
+  "out": "dist",
+  "includeVersion": false,
+  "excludePrivate": true,
+  "sort": [
+    "kind",
+    "instance-first",
+    "alphabetical-ignoring-documents"
+  ],
+  "navigationLinks": {
+    "GitHub": "https://github.com/Hudint/James"
+  },
+  "searchInComments": true,
+  "validation": {
+    "notExported": true,
+    "invalidLink": true,
+    "notDocumented": false
+  },
+  "treatWarningsAsErrors": true,
+  "disableSources": true
+}

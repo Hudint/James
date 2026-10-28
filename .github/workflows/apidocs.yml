@@ -1,0 +1,53 @@
+name: Plugin API reference
+
+# Builds the plugin API reference (apidocs/) on every change. Publishes it to GitHub Pages from
+# main once enabled: Settings → Pages → Source "GitHub Actions", and the repository variable
+# PAGES_ENABLED=true (Pages sites are public, also for private repositories).
+on:
+  push:
+    branches: [main]
+    paths: ['packages/api/**', 'docs/plugins/**', 'apidocs/**', '.github/workflows/apidocs.yml']
+  pull_request:
+    paths: ['packages/api/**', 'docs/plugins/**', 'apidocs/**', '.github/workflows/apidocs.yml']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# Pull requests must not cancel a queued deployment from main.
+concurrency:
+  group: pages-${{ github.event_name == 'pull_request' && github.ref || 'deploy' }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: apidocs
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - run: npm ci --ignore-scripts
+      # Warnings (broken links, …) fail the build (typedoc.json).
+      - run: npm run build
+      - uses: actions/upload-pages-artifact@v3
+        if: github.event_name != 'pull_request' && vars.PAGES_ENABLED == 'true'
+        with:
+          path: apidocs/dist
+
+  deploy:
+    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main' && vars.PAGES_ENABLED == 'true'
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4

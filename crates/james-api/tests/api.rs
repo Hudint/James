@@ -786,6 +786,17 @@ async fn unknown_hosts_are_refused_when_configured() {
             .status(),
         StatusCode::MISDIRECTED_REQUEST
     );
+    let rejected = app.clone().oneshot(get("rebind.attacker.example")).await.unwrap();
+    assert_eq!(
+        rejected.headers().get(header::X_FRAME_OPTIONS).unwrap(),
+        "DENY",
+        "security headers on the host check's answer too"
+    );
+    let body = rejected.into_body().collect().await.unwrap().to_bytes();
+    assert!(
+        String::from_utf8_lossy(&body).contains("rebind.attacker.example"),
+        "the error names the host, so it is easy to add"
+    );
 }
 
 #[tokio::test]

@@ -240,7 +240,7 @@ function wrapGroup(ctx: Context, bot: Bot, kind: 'server' | 'channel', id: strin
 
 function sTrack(ctx: Context, bot: Bot, track: any) {
   if (!track) return undefined;
-  const url = track.url ?? track.locator;
+  const url = track.locator;
   const play = (mode: string) => fire(ctx, 'play', bot.player.play(track, mode));
   return {
     id: () => `${track.source}:${track.locator}`,
@@ -256,7 +256,7 @@ function sTrack(ctx: Context, bot: Bot, track: any) {
     trackNumber: () => 0,
     thumbnail: () => track.thumbnail ?? '',
     filename: () => (track.source === 'local' ? path.basename(track.locator) : ''),
-    sourceURL: () => track.url ?? '',
+    sourceURL: () => (track.source === 'local' ? '' : track.locator),
     play: () => play('now'),
     enqueue: () => play('append'),
     addNext: () => play('next'),
@@ -283,7 +283,7 @@ function sPlaylist(ctx: Context, bot: Bot, playlist: any) {
         title: () => t.title ?? '',
         artist: () => t.artist ?? '',
         album: () => t.album ?? '',
-        url: () => t.url ?? t.locator,
+        url: () => t.locator,
         play: () => fire(ctx, 'play', bot.playlists.play(playlist.id, { start: index })),
       }));
     },

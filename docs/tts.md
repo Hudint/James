@@ -20,7 +20,7 @@ languages): [list and samples](https://rhasspy.github.io/piper-samples/). To add
 
 ```sh
 # Docker: mount a directory with voices and point James to it
-docker compose exec james /opt/piper/bin/python -m piper.download_voices \
+docker compose exec -u james james /opt/piper/bin/python -m piper.download_voices \
     --download-dir /data/voices fr_FR-siwis-medium de_DE-thorsten-medium en_US-lessac-medium
 # then set JAMES_TTS__PIPER__VOICES_DIR=/data/voices and restart
 ```

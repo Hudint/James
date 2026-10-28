@@ -72,7 +72,33 @@ pub async fn allowed_hosts(
             .iter()
             .any(|h| h.eq_ignore_ascii_case(host) || h.eq_ignore_ascii_case(name))
         {
-            return ApiError::new(StatusCode::MISDIRECTED_REQUEST, "unknown host").into_response();
+            // Says which name arrived, so a misconfiguration (address typed differently, proxy
+            // not passing `Host`) is quick to fix; the caller sent that name itself.
+            let shown: String = host.chars().filter(|c| c.is_ascii_graphic()).take(100).collect();
+            // At most every 30 s: scanners hit servers by address all the time.
+            static LAST_WARNING: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs())
+                .unwrap_or_default();
+            let last = LAST_WARNING.load(std::sync::atomic::Ordering::Relaxed);
+            if now >= last + 30
+                && LAST_WARNING
+                    .compare_exchange(
+                        last,
+                        now,
+                        std::sync::atomic::Ordering::Relaxed,
+                        std::sync::atomic::Ordering::Relaxed,
+                    )
+                    .is_ok()
+            {
+                tracing::warn!(host = %shown, "request for a host name not in http.allowed_hosts (further ones are not logged for 30 s)");
+            }
+            return ApiError::new(
+                StatusCode::MISDIRECTED_REQUEST,
+                format!("unknown host '{shown}': add it to http.allowed_hosts (JAMES_HTTP__ALLOWED_HOSTS)"),
+            )
+            .into_response();
         }
     }
     next.run(request).await

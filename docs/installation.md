@@ -8,13 +8,15 @@ ffmpeg, yt-dlp, Node.js for plugins and Piper with a German and an English voice
 Copy [`docker-compose.yml`](../docker-compose.yml) into an empty directory, then:
 
 ```sh
-mkdir data && sudo chown 1001:1001 data   # the container runs as user 1001
 docker compose up -d
 docker compose logs james | grep setup_token
 ```
 
-To run it as another user, set `user: "<uid>:<gid>"` in the compose file and give that user the
-`data` directory instead.
+James runs as the unprivileged user 1001 inside the container. The start script runs as root only
+to hand the empty `data/` directory to that user (Docker creates it as root), then drops its
+rights. A non-empty `data/` of another user is not changed: the script asks you to `chown` it. To run
+the whole container as another user instead, set `user: "<uid>:<gid>"` in the compose file and
+give that user the `data` directory.
 
 Open `http://<server>:8087`, enter the setup token from the log and create the administrator
 account. Then add a bot under **Instances → +**: the TeamSpeak server address, a nickname and
@@ -39,13 +41,19 @@ Serve the web interface via HTTPS and tell James its domain:
 
 WebSockets (`/api/v1/ws`, `/api/v1/instances/*/plugins/*/ws`) must be passed through.
 
+Publish the port on this machine only (`"127.0.0.1:8087:8087"`) when you trust a proxy address:
+otherwise anybody reaching the port directly could claim any client address. How to find the
+proxy's address and configuration examples for Caddy and nginx are in the
+[README](../README.md#https-with-a-reverse-proxy).
+
 ### YouTube on server IPs
 
 YouTube often blocks datacenter addresses ("Sign in to confirm you're not a bot"). In this order:
 
 1. The PO token provider of the compose file (enabled by default).
 2. Cookies of a YouTube account: export them in Netscape format (e.g. with a browser extension),
-   put the file into `data/` and set `JAMES_YTDLP__COOKIES=/data/youtube-cookies.txt`. Use a
+   copy the file into `data/` (`sudo install -o 1001 -g 1001 -m 600 cookies.txt
+   data/youtube-cookies.txt`) and set `JAMES_YTDLP__COOKIES=/data/youtube-cookies.txt`. Use a
    separate account; the file grants access to it.
 3. A residential proxy: `JAMES_YTDLP__PROXY=socks5://user:pass@host:1080`.
 

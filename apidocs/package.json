@@ -1,0 +1,12 @@
+{
+  "name": "james-apidocs",
+  "private": true,
+  "description": "Builds the plugin API reference (GitHub Pages) from packages/api/index.d.ts",
+  "scripts": {
+    "build": "node prepare.mjs && typedoc"
+  },
+  "devDependencies": {
+    "typedoc": "0.28.20",
+    "typescript": "5.9.3"
+  }
+}

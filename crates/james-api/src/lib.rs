@@ -83,4 +83,6 @@ pub fn app(state: AppState, web_root: Option<PathBuf>) -> Router {
         hosts,
         security::allowed_hosts,
     ))
+    // Also on responses of the host check (setting the headers twice is harmless).
+    .layer(axum::middleware::from_fn(security::headers))
 }

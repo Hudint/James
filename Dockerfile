@@ -55,7 +55,8 @@ COPY docker/entrypoint.sh /opt/james/bin/entrypoint.sh
 
 # Everything outside /data belongs to root: the bot cannot change its own tools.
 RUN useradd --create-home --uid 1001 james && mkdir -p /data && chown james:james /data
-USER james
+# The entrypoint starts as root only to hand /data to the james user (a bind mount created by
+# Docker belongs to root), then runs James as james.
 WORKDIR /data
 VOLUME /data
 EXPOSE 8087

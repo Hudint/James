@@ -20,7 +20,14 @@ services:
       # JAMES_HTTP__SECURE_COOKIES: "true"
     depends_on:
       - bgutil
+    # The start script only needs these to hand ./data to the james user and drop to it.
+    cap_drop: [ALL]
+    cap_add: [CHOWN, SETUID, SETGID, SETPCAP]
+    security_opt: ["no-new-privileges:true"]
+    logging:
+      options: { max-size: 10m, max-file: "3" }
 
   bgutil:
     image: brainicism/bgutil-ytdlp-pot-provider:2.0.2   # same version as in the image
     restart: unless-stopped
+

@@ -7,8 +7,9 @@ timers, …), subject to the permissions an administrator grants.
 
 - **Native plugins** use the typed API `@james/api` described here.
 - **SinusBot scripts** run unchanged through the compatibility layer, see [sinusbot.md](sinusbot.md).
-- The complete API reference is [`packages/api/index.d.ts`](../../packages/api/index.d.ts) (every
-  method and event is documented there; editors show it as you type).
+- The complete API reference is the [plugin API site](https://hudint.github.io/James/), generated
+  from [`packages/api/index.d.ts`](../../packages/api/index.d.ts) (editors show the same
+  documentation as you type).
 
 Contents: [Quick start](#quick-start) · [Manifest](#manifest) · [Lifecycle](#lifecycle) ·
 [Events](#events) · [Server state](#server-state) · [Chat and commands](#chat-and-commands) ·
@@ -411,7 +412,7 @@ interface.
 
 | Example | Shows |
 |---|---|
-| [`examples/plugins/welcome`](../../examples/plugins/welcome) | Events, settings, per-instance store |
-| [`examples/plugins/now-playing`](../../examples/plugins/now-playing) | Web page with a WebSocket and an HTTP endpoint, playback events |
-| [`examples/plugins/afk-mover`](../../examples/plugins/afk-mover) | Moderation, timers, `requestInfo` |
+| [`examples/plugins/welcome`](https://github.com/Hudint/James/tree/main/examples/plugins/welcome) | Events, settings, per-instance store |
+| [`examples/plugins/now-playing`](https://github.com/Hudint/James/tree/main/examples/plugins/now-playing) | Web page with a WebSocket and an HTTP endpoint, playback events |
+| [`examples/plugins/afk-mover`](https://github.com/Hudint/James/tree/main/examples/plugins/afk-mover) | Moderation, timers, `requestInfo` |
 | [`examples/plugins/sinusbot-greeter.js`](../../examples/plugins/sinusbot-greeter.js) | An unmodified SinusBot script |
