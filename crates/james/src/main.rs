@@ -116,6 +116,8 @@ async fn run(args: Args, config: Config, audio: tokio::runtime::Handle) -> anyho
 
     let manager = Arc::new(InstanceManager::new(services));
     load_instances(&db, &manager, &config.instances).await?;
+    let plugins = start_plugins(&config, &db, &manager, egress.url());
+    let plugins_for_shutdown = plugins.clone();
     manager.start_autostart().await;
 
     let scanner = Arc::new(library::LibraryScanner::new(
@@ -154,6 +156,8 @@ async fn run(args: Args, config: Config, audio: tokio::runtime::Handle) -> anyho
         ws_revalidate: std::time::Duration::from_secs(30),
         library: scanner,
         secure_cookies: config.http.secure_cookies,
+        plugins,
+        plugin_tokens: Default::default(),
     };
     let app = james_api::app(state, config.http.web_root.clone());
     if !config.http.bind.ip().is_loopback() && config.http.allowed_hosts.is_empty() {
@@ -175,8 +179,56 @@ async fn run(args: Args, config: Config, audio: tokio::runtime::Handle) -> anyho
     .with_graceful_shutdown(shutdown_signal())
     .await?;
     tracing::info!("shutting down");
+    if let Some(plugins) = &plugins_for_shutdown {
+        plugins.shutdown().await;
+    }
     manager.stop_all().await;
     Ok(())
+}
+
+/// Starts the plugin host supervisor (if enabled and installed).
+fn start_plugins(
+    config: &Config,
+    db: &Db,
+    manager: &Arc<InstanceManager>,
+    egress: &str,
+) -> Option<Arc<james_plugins::PluginManager>> {
+    if !config.plugins.enabled {
+        return None;
+    }
+    if !config.plugins.host.exists() {
+        tracing::warn!(host = %config.plugins.host.display(), "plugin host not found, plugins are disabled");
+        return None;
+    }
+    let plugins_dir = config
+        .plugins
+        .dir
+        .clone()
+        .unwrap_or_else(|| config.data_dir.join("plugins"));
+    if let Err(e) = std::fs::create_dir_all(&plugins_dir) {
+        tracing::warn!(error = %e, dir = %plugins_dir.display(), "cannot create the plugin directory");
+    }
+    let data_dir = config.data_dir.join("plugin-data");
+    if let Err(e) = private_dir(&data_dir) {
+        tracing::warn!(error = %format!("{e:#}"), "cannot create the plugin data directory");
+    }
+    let canonical = |p: &Path| std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
+    let plugins = james_plugins::PluginManager::new(
+        db.clone(),
+        manager.clone(),
+        james_plugins::PluginSettings {
+            node: config.plugins.node.clone(),
+            host_script: canonical(&config.plugins.host),
+            plugins_dir: canonical(&plugins_dir),
+            data_dir: canonical(&data_dir),
+            http_proxy: Some(egress.to_owned()),
+        },
+    );
+    {
+        let plugins = plugins.clone();
+        tokio::spawn(async move { plugins.start().await });
+    }
+    Some(plugins)
 }
 
 /// Instances live in the database; instances from the config file are imported once.

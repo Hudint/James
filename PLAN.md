@@ -54,9 +54,9 @@ to other sources), plugin catalog, more platforms, Postgres, ARM64 image, multi-
 │ Registries (traits): SourceResolver · TtsProvider · SttProvider (later) ·  │
 │                      Command · WebExtension                                │
 └──────────────┬─────────────────────────────────────────────────────────────┘
-               │ IPC (Unix socket, length-prefixed MessagePack, versioned)
+               │ IPC (socket pair on fd 3, length-prefixed JSON, versioned)
 ┌──────────────▼──────────── plugin host (Node.js 24) ───────────────────────┐
-│ One worker thread per plugin (serves all instances; per-instance contexts) │
+│ One process per plugin (Node permission model), worker threads inside     │
 │ TS executed natively (type stripping), full Node + npm + fetch             │
 │ Manifest with declared permissions, confirmed by admin, enforced by the    │
 │ bot API (trusted-code model, not a hard sandbox) · hot reload              │
@@ -74,7 +74,7 @@ de/en voices, Node.js 24.
 | Core | Rust | Native TS3 protocol, real-time audio, low footprint |
 | TeamSpeak | tsclientlib (maintained, last commit 07/2026); fork if TS6 needs changes | Own client, no headless official client, no Xvfb |
 | Discord (later) | serenity + songbird ≥ 0.6 (DAVE/E2EE supported via `davey`) | DAVE mandatory since 03/2026 |
-| Plugins | Separate Node.js process, worker per plugin | fetch/TCP/UDP/WS/DB/npm out of the box; crash isolation; scales (one host, not one per instance) |
+| Plugins | One Node.js process per plugin (permission model), worker threads inside | fetch/TCP/UDP/WS/DB/npm out of the box; crash isolation; scales (one host, not one per instance) |
 | YouTube on VPS | yt-dlp + PO-token provider + cookie import + optional proxy, self-update | Datacenter IPs are flagged by YouTube |
 | API / Web | axum, utoipa (OpenAPI), WebSocket events; SvelteKit, i18n en/de | |
 | DB | SQLite (sqlx, migrations), repository layer kept DB-agnostic | |

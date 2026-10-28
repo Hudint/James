@@ -1,0 +1,18 @@
+{
+  "name": "afk-mover",
+  "version": "1.0.0",
+  "description": "Moves clients that are away or idle into an AFK channel",
+  "type": "module",
+  "main": "index.ts",
+  "license": "MIT",
+  "james": {
+    "name": "AFK mover",
+    "permissions": ["moderation"],
+    "platforms": ["teamspeak"],
+    "config": [
+      { "name": "channel", "title": "AFK channel", "type": "channel" },
+      { "name": "away", "title": "Move clients that set themselves away", "type": "checkbox", "default": true },
+      { "name": "idleMinutes", "title": "Move clients idle for (minutes, 0 = off)", "type": "number", "default": 30 }
+    ]
+  }
+}

@@ -80,6 +80,64 @@ export interface InstanceConfig {
   autostart: boolean;
 }
 
+export interface ConfigField {
+  name: string;
+  title?: string;
+  type: string;
+  default?: unknown;
+  placeholder?: string;
+  options?: string[];
+  vars?: ConfigField[];
+  conditions?: { field: string; value: unknown }[];
+  indent?: number;
+}
+
+export interface PluginManifest {
+  id: string;
+  kind: 'james' | 'sinusbot';
+  name: string;
+  version: string;
+  description: string;
+  author: string;
+  permissions: string[];
+  config: ConfigField[];
+  platforms: string[];
+  autorun: boolean;
+  hidden: boolean;
+  web: boolean;
+}
+
+export type PluginStatus =
+  | { state: 'disabled' }
+  | { state: 'needsApproval'; missing: string[] }
+  | { state: 'running' }
+  | { state: 'starting' }
+  | { state: 'failed'; error: string }
+  | { state: 'unavailable' };
+
+export interface PluginInfo {
+  manifest: PluginManifest;
+  state: { id: string; enabled: boolean; grantedPermissions: string[]; instances: string[] | null };
+  status: PluginStatus;
+  activeInstances: string[];
+  commands: string[];
+}
+
+export interface PluginPermission {
+  id: string;
+  enforced: boolean;
+  risk: 'low' | 'medium' | 'high';
+  description: string;
+}
+
+export interface PluginOverview {
+  host: { state: 'starting' } | { state: 'running' } | { state: 'unavailable'; error: string };
+  plugins: PluginInfo[];
+  errors: { id: string; error: string }[];
+  pluginsDir?: string;
+  permissions: PluginPermission[];
+}
+
 export interface InstanceSummary {
   id: string;
   name: string;

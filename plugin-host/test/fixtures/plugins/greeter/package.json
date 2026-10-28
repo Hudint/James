@@ -1,0 +1,12 @@
+{
+  "name": "greeter",
+  "version": "1.0.0",
+  "description": "Greets clients",
+  "type": "module",
+  "main": "index.ts",
+  "james": {
+    "name": "Greeter",
+    "permissions": ["web"],
+    "config": [{ "name": "greeting", "title": "Greeting", "type": "string", "default": "Welcome" }]
+  }
+}

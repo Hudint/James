@@ -11,6 +11,7 @@ rust-version.workspace = true
 james-core.workspace = true
 james-api = { path = "../james-api" }
 james-db = { path = "../james-db" }
+james-plugins = { path = "../james-plugins" }
 james-runtime = { path = "../james-runtime" }
 james-sources = { path = "../james-sources" }
 james-teamspeak = { path = "../james-teamspeak" }

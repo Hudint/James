@@ -1,0 +1,29 @@
+[package]
+name = "james-plugins"
+description = "Plugin host supervision, IPC and plugin API bridge of James"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+james-core.workspace = true
+james-db = { path = "../james-db" }
+james-runtime = { path = "../james-runtime" }
+anyhow.workspace = true
+async-trait.workspace = true
+futures.workspace = true
+libc = "0.2"
+parking_lot = "0.12"
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+async-trait.workspace = true
+james-audio = { path = "../james-audio" }
+parking_lot = "0.12"
+tempfile = "3"

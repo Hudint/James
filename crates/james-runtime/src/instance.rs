@@ -140,17 +140,35 @@ pub struct InstanceStatus {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(tag = "type", rename_all = "camelCase")]
+#[serde(tag = "type", rename_all = "camelCase", rename_all_fields = "camelCase")]
 pub enum InstanceEvent {
     Started,
     Stopped,
-    Connected { snapshot: Snapshot },
-    Disconnected { reason: String },
-    Platform { event: PlatformEvent },
-    TrackStarted { item: QueueItem },
-    TrackEnded { item: QueueItem, error: Option<String> },
+    Connected {
+        snapshot: Box<Snapshot>,
+    },
+    Disconnected {
+        reason: String,
+    },
+    Platform {
+        event: Box<PlatformEvent>,
+    },
+    TrackStarted {
+        item: QueueItem,
+    },
+    TrackEnded {
+        item: QueueItem,
+        error: Option<String>,
+    },
     QueueChanged,
-    PlaybackChanged { status: Box<InstanceStatus> },
+    PlaybackChanged {
+        status: Box<InstanceStatus>,
+    },
+    /// Message for the users of the web interface (e.g. from a plugin).
+    Notice {
+        source: String,
+        message: String,
+    },
 }
 
 /// An event tagged with the instance it belongs to (one bus for all instances).
@@ -988,7 +1006,7 @@ impl InstanceTask {
                 self.connected = true;
                 self.last_error = None;
                 self.emit(InstanceEvent::Connected {
-                    snapshot: snapshot.clone(),
+                    snapshot: Box::new(snapshot.clone()),
                 });
                 self.update_description();
                 return;
@@ -1019,16 +1037,28 @@ impl InstanceTask {
                     });
                 }
                 let sensitive = is_command || *mode == MessageTarget::Client;
-                self.emit_with(InstanceEvent::Platform { event }, sensitive);
+                self.emit_with(
+                    InstanceEvent::Platform {
+                        event: Box::new(event),
+                    },
+                    sensitive,
+                );
                 return;
             }
             PlatformEvent::Poke { .. } => {
-                self.emit_with(InstanceEvent::Platform { event }, true);
+                self.emit_with(
+                    InstanceEvent::Platform {
+                        event: Box::new(event),
+                    },
+                    true,
+                );
                 return;
             }
             _ => {}
         }
-        self.emit(InstanceEvent::Platform { event });
+        self.emit(InstanceEvent::Platform {
+            event: Box::new(event),
+        });
     }
 
     /// Runs chat commands of one client in order, with a per-client rate limit.

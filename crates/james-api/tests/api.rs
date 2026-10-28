@@ -80,6 +80,8 @@ impl Api {
             library: library.clone(),
             secure_cookies: false,
             ws_revalidate: Duration::from_millis(200),
+            plugins: None,
+            plugin_tokens: Default::default(),
         };
         Self {
             app: james_api::router(state),
@@ -715,6 +717,8 @@ async fn unknown_hosts_are_refused_when_configured() {
         trusted_proxies: Default::default(),
         allowed_hosts: Arc::new(vec!["bot.example".into()]),
         ws_revalidate: Duration::from_secs(30),
+        plugins: None,
+        plugin_tokens: Default::default(),
     };
     let app = james_api::app(state, None);
     let get = |host: &str| {

@@ -23,6 +23,8 @@
     'library.manage',
     'playlist.read',
     'playlist.manage',
+    'plugins.manage',
+    'plugins.use',
     'users.manage',
   ] as const;
   let permLabels = $derived(locales[i18n.locale].users.perms as Record<string, string>);

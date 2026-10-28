@@ -9,6 +9,8 @@ import type {
   Me,
   PlayMode,
   Playlist,
+  PluginInfo,
+  PluginOverview,
   QueueItem,
   RepeatMode,
   Role,
@@ -134,6 +136,16 @@ export const api = {
   appendToPlaylist: (id: number, input: string) => request<Track[]>('POST', `/playlists/${id}/tracks`, { input }),
   playPlaylist: (id: number, instance: string, mode: PlayMode) =>
     request<QueueItem[]>('POST', `/playlists/${id}/play`, { instance, mode }),
+
+  plugins: () => request<PluginOverview>('GET', '/plugins'),
+  reloadPlugins: () => request<void>('POST', '/plugins/reload'),
+  configurePlugin: (id: string, body: { enabled: boolean; permissions: string[]; instances: string[] | null }) =>
+    request<PluginInfo>('PUT', `/plugins/${enc(id)}`, body),
+  pluginToken: (instance: string, id: string) =>
+    request<{ token: string; expiresInSecs: number }>('POST', `/instances/${enc(instance)}/plugins/${enc(id)}/token`),
+  pluginConfigs: (id: string) => request<Record<string, Record<string, unknown>>>('GET', `/plugins/${enc(id)}/config`),
+  setPluginConfig: (instance: string, id: string, config: Record<string, unknown>) =>
+    request<void>('PUT', `/instances/${enc(instance)}/plugins/${enc(id)}/config`, config),
 
   users: () => request<User[]>('GET', '/users'),
   createUser: (body: { username: string; password?: string; isAdmin?: boolean; roles?: string[] }) =>

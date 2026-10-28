@@ -7,7 +7,9 @@ use std::time::Duration;
 
 use futures::prelude::*;
 use james_audio::{AudioEngine, EngineConfig, EngineEvent, PlayRequest};
-use james_core::platform::{MessageTarget, PlatformAdapter, PlatformCommand, PlatformContext, PlatformEvent};
+use james_core::platform::{
+    ChannelParams, MessageTarget, PlatformAdapter, PlatformCommand, PlatformContext, PlatformEvent,
+};
 use james_core::source::MediaInput;
 use james_teamspeak::{TeamSpeakAdapter, TeamSpeakConfig};
 use tokio::sync::{mpsc, oneshot};
@@ -126,9 +128,12 @@ async fn plays_audio_and_chats() {
     while !got_message {
         let mut listener_events = listener.events();
         tokio::select! {
+            // Only the listener's message (other bots on the server may greet the test bot).
             e = events.recv() => if let Some(PlatformEvent::Message { mode, from, text }) = e {
+                if from.id != listener_id.0.to_string() {
+                    continue;
+                }
                 assert_eq!(mode, MessageTarget::Client);
-                assert_eq!(from.id, listener_id.0.to_string());
                 assert_eq!(text, "!ping");
                 got_message = true;
             },
@@ -256,4 +261,141 @@ async fn plays_audio_and_chats() {
         listener.events().for_each(|_| future::ready(())),
     )
     .await;
+}
+
+/// Channel management, away status and client info requests against a real server.
+#[tokio::test]
+async fn manages_channels_and_status() {
+    let Some(address) = server() else {
+        eprintln!("JAMES_TS_TEST_ADDR not set, skipping");
+        return;
+    };
+    let (events_tx, mut events) = mpsc::unbounded_channel();
+    let (commands, commands_rx) = mpsc::channel(16);
+    let (_audio_tx, audio_rx) = mpsc::channel(4);
+    let mut ctx = PlatformContext {
+        events: events_tx,
+        commands: commands_rx,
+        audio: audio_rx,
+    };
+    let mut adapter = TeamSpeakAdapter::new(
+        TeamSpeakConfig {
+            address,
+            nickname: "JamesChannels".into(),
+            ..Default::default()
+        },
+        None,
+    )
+    .unwrap();
+    let bot = tokio::spawn(async move { adapter.run(&mut ctx).await });
+    let own = loop {
+        match events.recv().await {
+            Some(PlatformEvent::Connected { snapshot }) => break snapshot.own_client.unwrap(),
+            Some(PlatformEvent::Disconnected { reason }) => panic!("bot could not connect: {reason}"),
+            Some(_) => continue,
+            None => panic!("bot ended: {:?}", bot.await),
+        }
+    };
+
+    macro_rules! run {
+        ($make:expr) => {{
+            let (reply, rx) = oneshot::channel();
+            commands.send($make(reply)).await.unwrap();
+            tokio::time::timeout(Duration::from_secs(5), rx)
+                .await
+                .expect("no answer")
+                .unwrap()
+        }};
+    }
+    /// Waits for a platform event matching `f`.
+    async fn expect(
+        events: &mut mpsc::UnboundedReceiver<PlatformEvent>,
+        what: &str,
+        f: impl Fn(&PlatformEvent) -> bool,
+    ) -> PlatformEvent {
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        loop {
+            match tokio::time::timeout_at(deadline, events.recv()).await {
+                Ok(Some(e)) if f(&e) => return e,
+                Ok(Some(_)) => continue,
+                _ => panic!("no {what} event"),
+            }
+        }
+    }
+
+    let name = format!("james-test-{}", std::process::id());
+    let created = run!(|reply| PlatformCommand::CreateChannel {
+        params: ChannelParams {
+            name: Some(name.clone()),
+            topic: Some("created by a test".into()),
+            max_clients: Some(3),
+            ..Default::default()
+        },
+        reply,
+    });
+    match created {
+        Ok(id) => {
+            let event = expect(
+                &mut events,
+                "channel create",
+                |e| matches!(e, PlatformEvent::ChannelCreate { channel, .. } if channel.name == name),
+            )
+            .await;
+            let PlatformEvent::ChannelCreate { channel, .. } = event else {
+                unreachable!()
+            };
+            assert_eq!(channel.id, id);
+            assert_eq!(channel.max_clients, Some(3));
+
+            run!(|reply| PlatformCommand::EditChannel {
+                channel: id.clone(),
+                params: ChannelParams {
+                    topic: Some("edited".into()),
+                    ..Default::default()
+                },
+                reply,
+            })
+            .unwrap();
+            expect(&mut events, "channel update", |e| matches!(e, PlatformEvent::ChannelUpdate { channel, .. } if channel.id == id && channel.topic == "edited")).await;
+
+            run!(|reply| PlatformCommand::DeleteChannel {
+                channel: id.clone(),
+                force: true,
+                reply,
+            })
+            .unwrap();
+            expect(
+                &mut events,
+                "channel delete",
+                |e| matches!(e, PlatformEvent::ChannelDelete { id: deleted, .. } if *deleted == id),
+            )
+            .await;
+        }
+        // Servers can deny guests creating channels.
+        Err(e) => eprintln!("channel creation refused by the server ({e}), skipping channel checks"),
+    }
+
+    run!(|reply| PlatformCommand::SetAway {
+        message: Some("testing".into()),
+        reply,
+    })
+    .unwrap();
+    expect(&mut events, "away update", |e| matches!(e, PlatformEvent::ClientUpdate { client } if client.id == own && client.away.as_deref() == Some("testing"))).await;
+    run!(|reply| PlatformCommand::SetAway { message: None, reply }).unwrap();
+    expect(
+        &mut events,
+        "back update",
+        |e| matches!(e, PlatformEvent::ClientUpdate { client } if client.id == own && client.away.is_none()),
+    )
+    .await;
+
+    run!(|reply| PlatformCommand::RequestClientInfo {
+        client: own.clone(),
+        reply,
+    })
+    .unwrap();
+    expect(&mut events, "connection info", |e| matches!(e, PlatformEvent::ClientUpdate { client } if client.id == own && client.connection.is_some())).await;
+
+    drop(commands);
+    let _ = bot.await.unwrap();
 }

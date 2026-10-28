@@ -25,6 +25,7 @@ pub struct Config {
     pub media: MediaConfig,
     pub ytdlp: YtDlpConfig,
     pub network: NetworkPolicy,
+    pub plugins: PluginsConfig,
     /// Instances defined in the config file (more can be created via the API).
     pub instances: Vec<InstanceConfig>,
 }
@@ -47,6 +48,29 @@ impl Default for ToolsConfig {
             ffprobe: "ffprobe".into(),
             max_concurrent: 8,
             audio_threads: 2,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct PluginsConfig {
+    pub enabled: bool,
+    /// Node.js 24+ executable.
+    pub node: String,
+    /// Entry point of the plugin host.
+    pub host: PathBuf,
+    /// Plugin directory; default `<data_dir>/plugins`.
+    pub dir: Option<PathBuf>,
+}
+
+impl Default for PluginsConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            node: "node".into(),
+            host: PathBuf::from("plugin-host/src/main.ts"),
+            dir: None,
         }
     }
 }
@@ -100,6 +124,7 @@ impl Default for Config {
             media: MediaConfig::default(),
             ytdlp: YtDlpConfig::default(),
             network: NetworkPolicy::default(),
+            plugins: PluginsConfig::default(),
             instances: Vec::new(),
         }
     }

@@ -2,6 +2,7 @@ mod account;
 mod instances;
 mod library;
 mod playlists;
+pub(crate) mod plugins;
 mod users;
 mod ws;
 
@@ -22,9 +23,11 @@ pub fn router(state: AppState) -> Router {
         .merge(users::routes())
         .merge(playlists::routes())
         .merge(library::routes())
+        .merge(plugins::routes())
         .merge(ws::routes());
     Router::new()
         .nest("/api/v1", api)
+        .merge(plugins::web_routes())
         .layer(axum::middleware::from_fn(crate::security::same_origin))
         .layer(axum::middleware::from_fn(crate::security::headers))
         .layer(DefaultBodyLimit::max(MAX_BODY))

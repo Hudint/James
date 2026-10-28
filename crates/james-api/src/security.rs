@@ -13,10 +13,27 @@ use crate::error::ApiError;
 pub async fn same_origin(request: Request, next: Next) -> Response {
     let safe = matches!(*request.method(), Method::GET | Method::HEAD | Method::OPTIONS);
     let upgrade = request.headers().get(header::UPGRADE).is_some();
-    if (!safe || upgrade) && !is_same_origin(request.headers()) {
+    // Public plugin endpoints are meant for other sites and never use the session; sandboxed
+    // plugin pages authenticate with plugin tokens only (no cookies).
+    let path = request.uri().path();
+    let public = path.starts_with("/api/v1/public/");
+    let plugin_page =
+        is_plugin_endpoint(path) && crate::routes::plugins::plugin_token(request.headers()).is_some();
+    if (!safe || upgrade) && !public && !plugin_page && !is_same_origin(request.headers()) {
         return ApiError::new(StatusCode::FORBIDDEN, "cross-origin request refused").into_response();
     }
     next.run(request).await
+}
+
+/// `/api/v1/instances/<instance>/plugins/<id>/events/<name>` or `…/plugins/<id>/ws`: the only
+/// routes accepting plugin tokens.
+fn is_plugin_endpoint(path: &str) -> bool {
+    let parts: Vec<&str> = path.split('/').collect();
+    match parts.as_slice() {
+        ["", "api", "v1", "instances", _, "plugins", _, "events", name] => !name.is_empty(),
+        ["", "api", "v1", "instances", _, "plugins", _, "ws"] => true,
+        _ => false,
+    }
 }
 
 fn is_same_origin(headers: &axum::http::HeaderMap) -> bool {
@@ -71,10 +88,11 @@ pub async fn headers(request: Request, next: Next) -> Response {
     );
     h.insert(header::X_FRAME_OPTIONS, HeaderValue::from_static("DENY"));
     h.insert(header::REFERRER_POLICY, HeaderValue::from_static("no-referrer"));
-    h.insert(
-        header::CONTENT_SECURITY_POLICY,
-        HeaderValue::from_static("frame-ancestors 'none'; object-src 'none'; base-uri 'self'"),
-    );
+    // Responses with their own policy (sandboxed plugin pages) keep it.
+    h.entry(header::CONTENT_SECURITY_POLICY)
+        .or_insert(HeaderValue::from_static(
+            "frame-ancestors 'none'; object-src 'none'; base-uri 'self'",
+        ));
     response
 }
 
@@ -88,6 +106,20 @@ mod tests {
             map.insert(*k, HeaderValue::from_static(v));
         }
         map
+    }
+
+    #[test]
+    fn plugin_endpoints_are_matched_exactly() {
+        assert!(is_plugin_endpoint(
+            "/api/v1/instances/music/plugins/np/events/current"
+        ));
+        assert!(is_plugin_endpoint("/api/v1/instances/music/plugins/np/ws"));
+        assert!(!is_plugin_endpoint("/api/v1/instances/plugins/plugins/np/config"));
+        assert!(!is_plugin_endpoint("/api/v1/instances/music/plugins/np/token"));
+        assert!(!is_plugin_endpoint("/api/v1/plugins/np"));
+        assert!(!is_plugin_endpoint(
+            "/api/v1/instances/music/plugins/np/events/a/b"
+        ));
     }
 
     #[test]

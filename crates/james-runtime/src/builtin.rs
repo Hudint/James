@@ -37,8 +37,8 @@ impl Command for Builtin {
     fn name(&self) -> &str {
         self.name
     }
-    fn aliases(&self) -> &[&str] {
-        self.aliases
+    fn aliases(&self) -> Vec<&str> {
+        self.aliases.to_vec()
     }
     fn usage(&self) -> &str {
         self.usage
@@ -270,7 +270,7 @@ fn help(ctx: &CommandContext) -> Output<'_> {
         let registry = &ctx.instance.services().commands;
         if !ctx.args.is_empty() {
             let command = registry
-                .get(&ctx.args)
+                .get_for(&ctx.args, ctx.instance.id())
                 .ok_or_else(|| anyhow!("unknown command '{}'", ctx.args))?;
             let mut text = format!(
                 "{} {} – {}",
@@ -284,7 +284,7 @@ fn help(ctx: &CommandContext) -> Output<'_> {
             return Ok(Some(text));
         }
         let lines: Vec<String> = registry
-            .list()
+            .list_for(ctx.instance.id())
             .iter()
             .map(|c| format!("{} {} – {}", c.name(), c.usage(), c.description()))
             .collect();

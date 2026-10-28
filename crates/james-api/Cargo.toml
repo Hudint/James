@@ -10,6 +10,7 @@ rust-version.workspace = true
 [dependencies]
 james-core.workspace = true
 james-db = { path = "../james-db" }
+james-plugins = { path = "../james-plugins" }
 james-runtime = { path = "../james-runtime" }
 anyhow.workspace = true
 async-trait.workspace = true
@@ -23,11 +24,11 @@ serde_json.workspace = true
 thiserror.workspace = true
 time = "0.3"
 tokio.workspace = true
+tower = { version = "0.5", features = ["util"] }
 tower-http = { version = "0.6", features = ["trace", "fs", "limit"] }
 tracing.workspace = true
 
 [dev-dependencies]
 tokio-tungstenite = "0.30"
 tempfile = "3"
-tower = { version = "0.5", features = ["util"] }
 http-body-util = "0.1"

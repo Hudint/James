@@ -1,0 +1,6 @@
+{
+  "name": "accounts",
+  "type": "module",
+  "main": "index.js",
+  "james": { "permissions": ["users"] }
+}

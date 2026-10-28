@@ -12,3 +12,11 @@ bind = "127.0.0.1:8087"
 level = "info"
 # "pretty" or "json"
 format = "pretty"
+
+# Plugins run in a Node.js 24+ process (see docs/plugins/README.md).
+[plugins]
+enabled = true
+node = "node"
+host = "plugin-host/src/main.ts"
+# Plugin directory; default: <data_dir>/plugins
+# dir = "plugins"

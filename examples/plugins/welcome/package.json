@@ -1,0 +1,16 @@
+{
+  "name": "welcome",
+  "version": "1.0.0",
+  "description": "Greets clients when they connect and counts their visits",
+  "type": "module",
+  "main": "index.ts",
+  "license": "MIT",
+  "james": {
+    "name": "Welcome",
+    "config": [
+      { "name": "message", "title": "Greeting ({name}, {visits})", "type": "string", "default": "Welcome, {name}! This is visit number {visits}." },
+      { "name": "poke", "title": "Poke instead of a chat message", "type": "checkbox", "default": false },
+      { "name": "ignoreGroups", "title": "Ignore clients in these server groups (ids)", "type": "strings", "default": [] }
+    ]
+  }
+}

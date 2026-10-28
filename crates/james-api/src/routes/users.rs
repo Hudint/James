@@ -157,6 +157,7 @@ async fn update(
         || body.roles.is_some();
     if security_relevant && id != auth.user.id {
         state.db.revoke_user_tokens(id, None).await?;
+        state.plugin_tokens.revoke_user(id);
     }
     Ok(Json(state.db.user(id).await?))
 }
@@ -169,6 +170,7 @@ async fn remove(State(state): State<AppState>, auth: Auth, Path(id): Path<i64>) 
     let target = state.db.user(id).await?;
     ensure_can_manage(&state, &auth, &target).await?;
     state.db.delete_user(id).await?;
+    state.plugin_tokens.revoke_user(id);
     Ok(StatusCode::NO_CONTENT)
 }
 

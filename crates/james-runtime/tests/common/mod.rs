@@ -97,9 +97,7 @@ pub fn user(name: &str) -> Client {
         id: format!("id-{name}"),
         uid: format!("uid-{name}"),
         name: name.into(),
-        channel: None,
-        server_groups: vec![],
-        is_self: false,
+        ..Default::default()
     }
 }
 

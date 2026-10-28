@@ -85,6 +85,7 @@
     { href: '/', icon: 'dashboard', label: 'nav.dashboard' },
     { href: '/library', icon: 'library', label: 'nav.library', permission: 'library.read' },
     { href: '/playlists', icon: 'list', label: 'nav.playlists', permission: 'playlist.read' },
+    { href: '/plugins', icon: 'puzzle', label: 'nav.plugins', permission: 'plugins.manage' },
     { href: '/users', icon: 'users', label: 'nav.users', permission: 'users.manage' },
   ];
 

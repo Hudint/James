@@ -179,9 +179,16 @@ async fn remove(State(state): State<AppState>, auth: Auth, Path(id): Path<String
     let instance = id.clone();
     state
         .manager
-        .delete(&id, || async move { Ok(db.delete_instance(&instance).await?) })
+        .delete(&id, || async move {
+            db.delete_instance(&instance).await?;
+            // Plugin settings and stores of the instance go with it.
+            Ok(db.delete_plugin_instance_data(&instance).await?)
+        })
         .await
         .map_err(configure_error)?;
+    if let Some(plugins) = &state.plugins {
+        plugins.reconcile().await;
+    }
     Ok(StatusCode::NO_CONTENT)
 }
 

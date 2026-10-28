@@ -3,6 +3,7 @@
 //! TeamSpeak 6 servers accept the TS3 client protocol from clients reporting
 //! version 3.6.0 or newer, which is what this adapter announces by default.
 
+mod channel;
 mod convert;
 
 use std::collections::HashMap;
@@ -17,10 +18,11 @@ use james_core::platform::{
     PlatformFactory, Reply,
 };
 use serde::{Deserialize, Serialize};
+use tsclientlib::messages::c2s;
 use tsclientlib::prelude::*;
 use tsclientlib::{
-    ChannelId, ClientId, Connection, DisconnectOptions, Identity, MessageHandle, Reason, ServerGroupId,
-    StreamItem, Version,
+    ChannelGroupId, ChannelId, ClientId, Connection, DisconnectOptions, Identity, MessageHandle, Reason,
+    ServerGroupId, StreamItem, Version,
 };
 use tsproto_packets::packets::{AudioData, CodecType, OutAudio, OutCommand};
 
@@ -210,6 +212,7 @@ impl PlatformAdapter for TeamSpeakAdapter {
 
         let mut session = Session {
             pending: HashMap::new(),
+            created: Vec::new(),
             can_send_audio: true,
             reconnecting: false,
             audio_closed: false,
@@ -246,8 +249,17 @@ impl TeamSpeakAdapter {
     }
 }
 
+/// A channel creation waiting for its result; the new id is looked up in the book.
+struct PendingCreate {
+    name: String,
+    parent: ChannelId,
+    done: tokio::sync::oneshot::Receiver<anyhow::Result<()>>,
+    reply: Reply<String>,
+}
+
 struct Session {
     pending: HashMap<MessageHandle, Reply<()>>,
+    created: Vec<PendingCreate>,
     can_send_audio: bool,
     /// tsclientlib is re-establishing the connection; ids in the book change.
     reconnecting: bool,
@@ -319,16 +331,16 @@ impl Session {
                     });
                     return;
                 }
-                for event in events {
-                    if let Some(event) = convert::event(state, &event) {
-                        let _ = ctx.events.send(event);
-                    }
+                let converted = events.iter().filter_map(|e| convert::event(state, e)).collect();
+                for event in convert::coalesce(converted) {
+                    let _ = ctx.events.send(event);
                 }
             }
             StreamItem::MessageResult(handle, result) => {
                 if let Some(reply) = self.pending.remove(&handle) {
                     let _ = reply.send(result.map_err(|e| anyhow!("{e}")));
                 }
+                self.finish_creates(con);
             }
             StreamItem::AudioChange(tsclientlib::AudioEvent::CanSendAudio(can)) => {
                 tracing::debug!(can, "can send audio changed");
@@ -340,6 +352,7 @@ impl Session {
                 for (_, reply) in self.pending.drain() {
                     let _ = reply.send(Err(anyhow!("connection lost")));
                 }
+                self.finish_creates(con);
                 let _ = ctx.events.send(PlatformEvent::Disconnected {
                     reason: format!("{reason:?}"),
                 });
@@ -457,12 +470,188 @@ impl Session {
                 let result = with_client(con, &client, |c| Ok(c.remove_server_group(parse_group(&group)?)));
                 self.send(con, result, reply);
             }
+            PlatformCommand::Ban {
+                client,
+                seconds,
+                reason,
+                reply,
+            } => {
+                let result = with_client(con, &client, |c| {
+                    Ok(c2s::OutBanClientMessage::new(&mut std::iter::once(
+                        c2s::OutBanClientPart {
+                            client_id: c.id,
+                            time: (seconds > 0)
+                                .then(|| time::Duration::seconds(seconds.min(i64::MAX as u64) as i64)),
+                            ban_reason: (!reason.is_empty()).then(|| reason.as_str().into()),
+                        },
+                    )))
+                });
+                self.send(con, result, reply);
+            }
+            PlatformCommand::SetAway { message, reply } => {
+                let result = con.get_state().map_err(Into::into).map(|s| {
+                    let mut update = s.client_update();
+                    update.is_away = Some(message.is_some());
+                    update.away_message = Some(message.as_deref().unwrap_or("").into());
+                    update.to_packet()
+                });
+                self.send(con, result, reply);
+            }
+            PlatformCommand::SetChannelGroup {
+                client,
+                channel,
+                group,
+                reply,
+            } => {
+                let result = (|| {
+                    let state = con.get_state()?;
+                    let c = state
+                        .clients
+                        .get(&parse_client(Some(&client))?)
+                        .ok_or_else(|| anyhow!("unknown client {client}"))?;
+                    Ok(c2s::OutSetClientChannelGroupMessage::new(&mut std::iter::once(
+                        c2s::OutSetClientChannelGroupPart {
+                            channel_group: ChannelGroupId(
+                                group
+                                    .parse()
+                                    .with_context(|| format!("invalid channel group id {group}"))?,
+                            ),
+                            channel_id: parse_channel(&channel)?,
+                            client_db_id: c.database_id,
+                        },
+                    )))
+                })();
+                self.send(con, result, reply);
+            }
+            PlatformCommand::CreateChannel { params, reply } => {
+                let name = params.name.clone().unwrap_or_default();
+                let parent = match params.parent.as_deref() {
+                    Some(p) => match parse_channel(p) {
+                        Ok(id) => id,
+                        Err(e) => {
+                            let _ = reply.send(Err(e));
+                            return;
+                        }
+                    },
+                    None => ChannelId(0),
+                };
+                // Invalid parameters are answered right away (no server round trip).
+                let packet = match channel::create(&params) {
+                    Ok(packet) => packet,
+                    Err(e) => {
+                        let _ = reply.send(Err(e));
+                        return;
+                    }
+                };
+                let (tx, rx) = tokio::sync::oneshot::channel();
+                self.send(con, Ok(packet), tx);
+                self.created.push(PendingCreate {
+                    name,
+                    parent,
+                    done: rx,
+                    reply,
+                });
+            }
+            PlatformCommand::EditChannel {
+                channel,
+                params,
+                reply,
+            } => {
+                let result = parse_channel(&channel).and_then(|id| channel::edit(id, &params));
+                self.send(con, result, reply);
+            }
+            PlatformCommand::MoveChannel {
+                channel,
+                parent,
+                order,
+                reply,
+            } => {
+                let result = (|| {
+                    Ok(c2s::OutChannelMoveMessage::new(&mut std::iter::once(
+                        c2s::OutChannelMovePart {
+                            channel_id: parse_channel(&channel)?,
+                            parent_id: match parent.as_deref() {
+                                Some(p) => parse_channel(p)?,
+                                None => ChannelId(0),
+                            },
+                            order: order.as_deref().map(parse_channel).transpose()?,
+                        },
+                    )))
+                })();
+                self.send(con, result, reply);
+            }
+            PlatformCommand::DeleteChannel {
+                channel,
+                force,
+                reply,
+            } => {
+                let result = parse_channel(&channel).map(|id| {
+                    c2s::OutChannelDeleteMessage::new(&mut std::iter::once(c2s::OutChannelDeletePart {
+                        channel_id: id,
+                        force,
+                    }))
+                });
+                self.send(con, result, reply);
+            }
+            PlatformCommand::Subscribe {
+                channel,
+                subscribe,
+                reply,
+            } => {
+                let result = parse_channel(&channel).map(|id| {
+                    if subscribe {
+                        c2s::OutChannelSubscribeMessage::new(&mut std::iter::once(
+                            c2s::OutChannelSubscribePart { channel_id: id },
+                        ))
+                    } else {
+                        c2s::OutChannelUnsubscribeMessage::new(&mut std::iter::once(
+                            c2s::OutChannelUnsubscribePart { channel_id: id },
+                        ))
+                    }
+                });
+                self.send(con, result, reply);
+            }
+            PlatformCommand::RequestClientInfo { client, reply } => {
+                // Variables (version, platform, connection count) and connection info both
+                // update the book, which emits ClientUpdate events.
+                let variables = with_client(con, &client, |c| Ok(c.variables().to_packet()));
+                if let Ok(packet) = variables {
+                    let _ = packet.send(con);
+                }
+                let result = with_client(con, &client, |c| Ok(c.connection_info().to_packet()));
+                self.send(con, result, reply);
+            }
             PlatformCommand::Extension { name, reply, .. } => {
                 let _ = reply.send(Err(anyhow!("unsupported TeamSpeak extension '{name}'")));
             }
             // Handled by the session loop before dispatching.
             PlatformCommand::Disconnect { .. } => {}
         }
+    }
+
+    /// Answers finished channel creations. The server announces the channel before the
+    /// command result, so it is already in the book.
+    fn finish_creates(&mut self, con: &Connection) {
+        let Ok(state) = con.get_state() else { return };
+        self.created.retain_mut(|pending| {
+            let result = match pending.done.try_recv() {
+                Ok(result) => result,
+                Err(tokio::sync::oneshot::error::TryRecvError::Empty) => return !pending.reply.is_closed(),
+                Err(tokio::sync::oneshot::error::TryRecvError::Closed) => Err(anyhow!("connection lost")),
+            };
+            let reply = std::mem::replace(&mut pending.reply, tokio::sync::oneshot::channel().0);
+            let _ = reply.send(result.and_then(|()| {
+                state
+                    .channels
+                    .values()
+                    .filter(|c| c.name == pending.name && c.parent == pending.parent)
+                    .map(|c| c.id.0)
+                    .max()
+                    .map(|id| id.to_string())
+                    .ok_or_else(|| anyhow!("channel was created but is not visible"))
+            }));
+            false
+        });
     }
 
     fn send(&mut self, con: &mut Connection, packet: anyhow::Result<OutCommand>, reply: Reply<()>) {

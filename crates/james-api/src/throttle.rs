@@ -28,7 +28,7 @@ const USER_LIMIT: u32 = 100;
 const USER_DELAY: Duration = Duration::from_secs(3);
 
 /// The address used for throttling: IPv4 as is, IPv6 reduced to its /64 network.
-fn network_of(ip: IpAddr) -> IpAddr {
+pub(crate) fn network_of(ip: IpAddr) -> IpAddr {
     match ip {
         IpAddr::V4(_) => ip,
         IpAddr::V6(v6) => match v6.to_ipv4_mapped() {
@@ -268,6 +268,40 @@ mod tests {
 #[derive(Clone, Default)]
 pub struct ActionLimiter {
     recent: Arc<Mutex<HashMap<i64, std::collections::VecDeque<Instant>>>>,
+    /// Unauthenticated callers, by network (IPv6 /64).
+    addresses: Arc<Mutex<HashMap<IpAddr, std::collections::VecDeque<Instant>>>>,
+}
+
+/// Tracked keys after which idle entries are dropped (bounds memory under address rotation).
+const MAX_TRACKED: usize = 10_000;
+
+fn take_slot<K: std::hash::Hash + Eq>(
+    map: &mut HashMap<K, std::collections::VecDeque<Instant>>,
+    key: K,
+) -> Result<(), crate::error::ApiError> {
+    let now = Instant::now();
+    if map.len() >= MAX_TRACKED {
+        map.retain(|_, times| {
+            times
+                .back()
+                .is_some_and(|t| now.duration_since(*t) <= ACTION_WINDOW)
+        });
+    }
+    let times = map.entry(key).or_default();
+    while times
+        .front()
+        .is_some_and(|t| now.duration_since(*t) > ACTION_WINDOW)
+    {
+        times.pop_front();
+    }
+    if times.len() >= ACTIONS_PER_WINDOW {
+        return Err(crate::error::ApiError::new(
+            axum::http::StatusCode::TOO_MANY_REQUESTS,
+            "too many requests, please slow down",
+        ));
+    }
+    times.push_back(now);
+    Ok(())
 }
 
 const ACTIONS_PER_WINDOW: usize = 20;
@@ -275,22 +309,11 @@ const ACTION_WINDOW: Duration = Duration::from_secs(10);
 
 impl ActionLimiter {
     pub fn check(&self, user: i64) -> Result<(), crate::error::ApiError> {
-        let now = Instant::now();
-        let mut recent = self.recent.lock();
-        let times = recent.entry(user).or_default();
-        while times
-            .front()
-            .is_some_and(|t| now.duration_since(*t) > ACTION_WINDOW)
-        {
-            times.pop_front();
-        }
-        if times.len() >= ACTIONS_PER_WINDOW {
-            return Err(crate::error::ApiError::new(
-                axum::http::StatusCode::TOO_MANY_REQUESTS,
-                "too many requests, please slow down",
-            ));
-        }
-        times.push_back(now);
-        Ok(())
+        take_slot(&mut self.recent.lock(), user)
+    }
+
+    /// Budget of an unauthenticated caller (IPv6 addresses count per /64).
+    pub fn check_address(&self, ip: IpAddr) -> Result<(), crate::error::ApiError> {
+        take_slot(&mut self.addresses.lock(), network_of(ip))
     }
 }

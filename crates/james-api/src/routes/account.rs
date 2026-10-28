@@ -200,6 +200,7 @@ async fn change_password(
         .db
         .revoke_user_tokens(auth.user.id, current.as_deref())
         .await?;
+    state.plugin_tokens.revoke_user(auth.user.id);
     Ok(StatusCode::NO_CONTENT)
 }
 

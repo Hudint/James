@@ -31,15 +31,47 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy, rustfmt
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
       - uses: Swatinem/rust-cache@v2
       - run: cargo fmt --all --check
       - run: cargo clippy --all-targets --locked -- -D warnings
       - run: cargo test --locked
       - name: Live test against TeamSpeak 3
-        run: cargo test --locked -p james-teamspeak --test live
+        run: cargo test --locked -p james-teamspeak --test live -- --test-threads=1
         env:
           JAMES_TS_TEST_ADDR: localhost:19987
       - name: Live test against TeamSpeak 6
-        run: cargo test --locked -p james-teamspeak --test live
+        run: cargo test --locked -p james-teamspeak --test live -- --test-threads=1
         env:
           JAMES_TS_TEST_ADDR: localhost:29987
+
+  plugin-host:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: plugin-host
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - run: npm ci
+      - run: npm run check
+      - run: npx tsc -p ../examples/plugins
+      - run: npm test
+
+  web:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: web
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - run: npm ci
+      - run: npm run check
+      - run: npm run build

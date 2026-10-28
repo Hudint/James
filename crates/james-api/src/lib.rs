@@ -7,6 +7,7 @@
 pub mod auth;
 pub mod error;
 pub mod linking;
+pub mod plugin_tokens;
 mod routes;
 pub mod security;
 pub mod throttle;
@@ -53,6 +54,10 @@ pub struct AppState {
     pub trusted_proxies: Arc<Vec<std::net::IpAddr>>,
     /// How often WebSocket connections re-validate their token and permissions.
     pub ws_revalidate: std::time::Duration,
+    /// Plugin system (`None` when disabled).
+    pub plugins: Option<Arc<james_plugins::PluginManager>>,
+    /// Tokens of plugin pages.
+    pub plugin_tokens: plugin_tokens::PluginTokens,
 }
 
 /// Builds the complete application router (API + optional static web UI).

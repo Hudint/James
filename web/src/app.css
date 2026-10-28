@@ -406,7 +406,8 @@ select:focus-visible,
 textarea:focus-visible {
   border-color: var(--accent);
 }
-input[aria-invalid='true'] {
+input[aria-invalid='true'],
+textarea[aria-invalid='true'] {
   border-color: var(--danger);
 }
 .checkbox {

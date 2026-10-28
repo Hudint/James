@@ -26,8 +26,8 @@ pub struct CommandContext {
 #[async_trait]
 pub trait Command: Send + Sync {
     fn name(&self) -> &str;
-    fn aliases(&self) -> &[&str] {
-        &[]
+    fn aliases(&self) -> Vec<&str> {
+        Vec::new()
     }
     /// Argument syntax shown in help, e.g. `<url|search>`.
     fn usage(&self) -> &str {
@@ -37,6 +37,11 @@ pub trait Command: Send + Sync {
     /// Permission required to run the command (checked by the [`PermissionChecker`]).
     fn permission(&self) -> Option<&str> {
         None
+    }
+    /// Whether the command exists on an instance (plugin commands only exist where the
+    /// plugin is enabled).
+    fn available(&self, _instance: &str) -> bool {
+        true
     }
     /// Runs the command; the returned text is sent back as a reply.
     async fn run(&self, ctx: &CommandContext) -> anyhow::Result<Option<String>>;
@@ -89,6 +94,23 @@ impl CommandRegistry {
         inner.commands.insert(name, command);
     }
 
+    /// Registers a command unless its name or an alias is already taken.
+    pub fn try_register(&self, command: Arc<dyn Command>) -> Result<(), String> {
+        let mut inner = self.inner.write();
+        let name = command.name().to_ascii_lowercase();
+        let aliases: Vec<String> = command.aliases().iter().map(|a| a.to_ascii_lowercase()).collect();
+        for taken in std::iter::once(&name).chain(&aliases) {
+            if inner.commands.contains_key(taken) || inner.aliases.contains_key(taken) {
+                return Err(format!("command name '{taken}' is already in use"));
+            }
+        }
+        for alias in aliases {
+            inner.aliases.insert(alias, name.clone());
+        }
+        inner.commands.insert(name, command);
+        Ok(())
+    }
+
     pub fn unregister(&self, name: &str) {
         let mut inner = self.inner.write();
         let name = name.to_ascii_lowercase();
@@ -105,6 +127,18 @@ impl CommandRegistry {
         let name = name.to_ascii_lowercase();
         let name = inner.aliases.get(&name).unwrap_or(&name);
         inner.commands.get(name).cloned()
+    }
+
+    /// A command available on `instance`.
+    pub fn get_for(&self, name: &str, instance: &str) -> Option<Arc<dyn Command>> {
+        self.get(name).filter(|c| c.available(instance))
+    }
+
+    /// All commands available on `instance`, sorted by name.
+    pub fn list_for(&self, instance: &str) -> Vec<Arc<dyn Command>> {
+        let mut list = self.list();
+        list.retain(|c| c.available(instance));
+        list
     }
 
     /// All commands sorted by name.
@@ -130,7 +164,7 @@ impl CommandRegistry {
         if name.is_empty() {
             return None;
         }
-        let Some(command) = self.get(name) else {
+        let Some(command) = self.get_for(name, instance.id()) else {
             return Some(format!(
                 "Unknown command '{}'. Try {prefix}help.",
                 james_core::text::escape_markup(name)

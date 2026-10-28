@@ -1,0 +1,14 @@
+{
+  "name": "now-playing",
+  "version": "1.0.0",
+  "description": "A live 'now playing' page and an announcement in the channel chat",
+  "type": "module",
+  "main": "index.ts",
+  "license": "MIT",
+  "james": {
+    "name": "Now playing",
+    "permissions": ["web"],
+    "web": true,
+    "config": [{ "name": "announce", "title": "Announce new tracks in the channel", "type": "checkbox", "default": true }]
+  }
+}
