@@ -211,7 +211,8 @@ const created = await bot.createChannel({ name: 'Room', parent: lobby.id, maxCli
 await created.update({ topic: 'Hi', password: 'secret' });
 await created.moveTo(null, '0');            // top level, first
 await created.delete(true);                 // also when not empty
-await channel.subscribe();                  // see the clients inside (TeamSpeak)
+await channel.subscribe(false);             // stop seeing the clients inside (TeamSpeak; the bot
+                                            // subscribes to all channels when it connects)
 ```
 
 ## Chat and commands

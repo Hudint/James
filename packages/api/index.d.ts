@@ -712,7 +712,11 @@ export interface Channel extends Readonly<ChannelData> {
   moveTo(parent: Channel | string | null, order?: string): Promise<void>;
   /** `channels` */
   delete(force?: boolean): Promise<void>;
-  /** Sees the clients inside (TeamSpeak subscription). */
+  /**
+   * Sees the clients inside (TeamSpeak subscription), or no longer (`false`). On TeamSpeak the
+   * bot subscribes to every channel it may when it (re)connects, as the TeamSpeak client does;
+   * an unsubscribe lasts until the next reconnect.
+   */
   subscribe(subscribe?: boolean): Promise<void>;
 }
 

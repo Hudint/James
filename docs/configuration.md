@@ -119,3 +119,8 @@ Set in the web interface (**Instance → Settings**) or via the API:
 | Voice | Voice for text to speech |
 | Now playing in description | Shows the current track in the bot's description |
 | Start automatically | Connects when James starts |
+
+On TeamSpeak the bot subscribes to every channel it may when it connects, as the TeamSpeak client
+does, so the web interface and plugins see the clients in all of them (not only in the bot's own
+channel). Channels whose occupants must stay hidden need a subscribe power the bot's server groups
+do not have (`i_channel_needed_subscribe_power`).

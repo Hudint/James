@@ -303,9 +303,6 @@ impl PlatformAdapter for TeamSpeakAdapter {
             None => bail!("connection closed during connect"),
         }
         tracing::info!(address = %self.config.address, "connected to TeamSpeak server");
-        let _ = ctx.events.send(PlatformEvent::Connected {
-            snapshot: snapshot(con.get_state()?),
-        });
         self.persist_identity(&con, ctx);
 
         let mut session = Session {
@@ -318,9 +315,9 @@ impl PlatformAdapter for TeamSpeakAdapter {
             audio_closed: false,
             reapply_pending: false,
             info_limiter: InfoLimiter::default(),
+            subscribing: None,
         };
-        // The join of the default channel may have been refused: check and apply.
-        session.reapply(&mut con);
+        session.begin_connected(&mut con, ctx);
         let result = session.run(&mut con, ctx).await;
         if result.is_err() {
             let _ = con.disconnect(DisconnectOptions::new());
@@ -382,7 +379,13 @@ struct Session {
     /// first server state).
     reapply_pending: bool,
     info_limiter: InfoLimiter,
+    /// Subscribing to all channels after (re)connecting, until the reply or the deadline: the
+    /// clients that become visible meanwhile go into the `Connected` snapshot, not into events.
+    subscribing: Option<(MessageHandle, tokio::time::Instant)>,
 }
+
+/// Longest wait for the subscription to all channels before `Connected` is sent anyway.
+const SUBSCRIBE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 
 /// Shortest interval between two info requests for the same client.
 const INFO_INTERVAL: std::time::Duration = std::time::Duration::from_secs(10);
@@ -427,16 +430,20 @@ enum Input {
     Event(Option<Result<StreamItem, tsclientlib::Error>>),
     Command(Option<PlatformCommand>),
     Audio(Option<OpusFrame>),
+    SubscribeTimeout,
 }
 
 impl Session {
     /// Returns the disconnect reason on a regular disconnect.
     async fn run(&mut self, con: &mut Connection, ctx: &mut PlatformContext) -> anyhow::Result<String> {
         loop {
+            let deadline = self.subscribing.map(|(_, deadline)| deadline);
             let input = {
                 let mut events = con.events();
                 tokio::select! {
                     e = events.next() => Input::Event(e),
+                    _ = tokio::time::sleep_until(deadline.unwrap_or_else(tokio::time::Instant::now)),
+                        if deadline.is_some() => Input::SubscribeTimeout,
                     c = ctx.commands.recv() => Input::Command(c),
                     a = ctx.audio.recv(), if !self.audio_closed => Input::Audio(a),
                 }
@@ -457,6 +464,10 @@ impl Session {
                     return Ok(reason);
                 }
                 Input::Command(Some(command)) => self.handle_command(con, command),
+                Input::SubscribeTimeout => {
+                    tracing::warn!("no answer to the channel subscription");
+                    self.finish_connected(con, ctx);
+                }
                 Input::Audio(None) => self.audio_closed = true,
                 Input::Audio(Some(frame)) => {
                     if self.can_send_audio {
@@ -479,16 +490,27 @@ impl Session {
             StreamItem::BookEvents(events) => {
                 let Ok(state) = con.get_state() else { return };
                 if self.reconnecting {
-                    // After a reconnect all client ids are new: publish a fresh snapshot.
+                    // After a reconnect all client ids are new: a fresh snapshot follows.
                     self.reconnecting = false;
                     self.info_limiter = InfoLimiter::default();
                     tracing::info!("reconnected");
-                    let _ = ctx.events.send(PlatformEvent::Connected {
-                        snapshot: snapshot(state),
-                    });
-                    // The library reconnected with the original name and channel (the join may
-                    // also have been refused): apply the current settings again.
-                    self.reapply(con);
+                    self.begin_connected(con, ctx);
+                    return;
+                }
+                if self.subscribing.is_some() {
+                    // Clients and channels are part of the snapshot that follows; chat, pokes and
+                    // leaves (a kick or ban is not in it) still go out (after a reconnect already
+                    // with the new client ids, which plugins learn with `Connected`).
+                    for event in events.iter().filter_map(|e| convert::event(state, e)) {
+                        if matches!(
+                            event,
+                            PlatformEvent::Message { .. }
+                                | PlatformEvent::Poke { .. }
+                                | PlatformEvent::ClientLeave { .. }
+                        ) {
+                            let _ = ctx.events.send(event);
+                        }
+                    }
                     return;
                 }
                 let converted = events.iter().filter_map(|e| convert::event(state, e)).collect();
@@ -500,6 +522,13 @@ impl Session {
                 }
             }
             StreamItem::MessageResult(handle, result) => {
+                if self.subscribing.is_some_and(|(h, _)| h == handle) {
+                    if let Err(e) = result {
+                        tracing::warn!(error = %e, "cannot subscribe to the channels");
+                    }
+                    self.finish_connected(con, ctx);
+                    return;
+                }
                 if let Some(reply) = self.pending.remove(&handle) {
                     let _ = reply.send(result.map_err(|e| anyhow!("{e}")));
                 }
@@ -512,6 +541,8 @@ impl Session {
             StreamItem::DisconnectedTemporarily(reason) => {
                 tracing::warn!(?reason, "temporarily disconnected, reconnecting");
                 self.reconnecting = true;
+                // `Connected` follows the reconnect, not this connection's subscription.
+                self.subscribing = None;
                 for (_, reply) in self.pending.drain() {
                     let _ = reply.send(Err(anyhow!("connection lost")));
                 }
@@ -847,6 +878,36 @@ impl Session {
             }));
             false
         });
+    }
+
+    /// After (re)connecting: subscribes to every channel, as the TeamSpeak client does (otherwise
+    /// the bot only sees the clients in its own channel, and plugins miss everyone else).
+    /// `Connected` follows once the server answered, with all clients in the snapshot.
+    fn begin_connected(&mut self, con: &mut Connection, ctx: &PlatformContext) {
+        match c2s::OutChannelSubscribeAllMessage::new().send_with_result(con) {
+            Ok(handle) => {
+                self.subscribing = Some((handle, tokio::time::Instant::now() + SUBSCRIBE_TIMEOUT));
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "cannot subscribe to the channels");
+                self.finish_connected(con, ctx);
+            }
+        }
+    }
+
+    /// Publishes the connection with the full client list and applies the settings (the library
+    /// (re)connected with the original name and channel, and the join may have been refused).
+    fn finish_connected(&mut self, con: &mut Connection, ctx: &PlatformContext) {
+        self.subscribing = None;
+        match con.get_state() {
+            Ok(state) => {
+                let _ = ctx.events.send(PlatformEvent::Connected {
+                    snapshot: snapshot(state),
+                });
+            }
+            Err(e) => tracing::warn!(error = %e, "no server state after connecting"),
+        }
+        self.reapply(con);
     }
 
     /// Applies the settings after (re)connecting: where the bot ended up is not known yet.
