@@ -56,8 +56,39 @@ Contents: [Quick start](#quick-start) · [Manifest](#manifest) · [Lifecycle](#l
    the plugin should run on and adjust its settings.
 
 TypeScript runs directly (Node.js strips the types, no build step). Use only erasable syntax:
-no `enum`, `namespace` or constructor parameter properties. For type checking and editor
-support, add `@james/api` as a dev dependency (`npm i -D <path to James>/packages/api`).
+no `enum`, `namespace` or constructor parameter properties.
+
+For type checking and editor support, add `@james/api` as a dev dependency. Every release from
+0.5.2 on has it attached (with its SHA-256 in `SHA256SUMS`); use the version of your James and
+commit the `package-lock.json`, which pins the file's hash:
+
+```sh
+npm i -D @james/api@https://github.com/Hudint/James/releases/download/v0.5.2/james-api-0.5.2.tgz
+npm i -D typescript
+```
+
+and a `tsconfig.json`:
+
+```json
+{
+  "compilerOptions": {
+    "target": "ES2024",
+    "module": "NodeNext",
+    "moduleResolution": "NodeNext",
+    "strict": true,
+    "noEmit": true,
+    "erasableSyntaxOnly": true,
+    "verbatimModuleSyntax": true,
+    "skipLibCheck": true
+  },
+  "include": ["**/*.ts"],
+  "exclude": ["node_modules"]
+}
+```
+
+Then `npx tsc -p .` checks every plugin, and editors type `bot`, events and clients. Without the
+package, `@james/api` cannot be resolved and everything is `any` (e.g. *TS7006: Parameter 'bot'
+implicitly has an 'any' type*).
 
 ## Manifest
 
@@ -99,6 +130,29 @@ This is the same schema as SinusBot's `vars`.
 
 Settings are per instance. After saving, the plugin restarts on that instance. A plugin can
 store its own settings with `bot.saveConfig(config)`.
+
+To type `bot.config`, pass the settings' type to `definePlugin`. Fields without a `default` are
+missing until the settings are saved, so declare them optional; a `select` holds the option's
+index (a number):
+
+```ts
+type Config = {
+  message: string;          // has a default
+  poke: boolean;            // has a default
+  channel?: string;         // no default
+  mode?: number;            // select: index of the option
+};
+
+export default definePlugin<Config>({
+  setup(bot) {
+    bot.config.message; // string
+  },
+});
+```
+
+Helpers in other files take `Bot<Config>`. Declare the settings with `type`, not `interface`: an
+interface is not assignable to the untyped `Bot`. The values are not checked against the type
+at runtime.
 
 ## Lifecycle
 

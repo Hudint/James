@@ -1,0 +1,13 @@
+{
+  "compilerOptions": {
+    "target": "ES2024",
+    "module": "NodeNext",
+    "moduleResolution": "NodeNext",
+    "strict": true,
+    "noEmit": true,
+    "skipLibCheck": false,
+    "types": [],
+    "paths": { "@james/api": ["../index.d.ts"] }
+  },
+  "include": ["types.ts"]
+}

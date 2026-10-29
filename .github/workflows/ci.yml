@@ -60,6 +60,8 @@ jobs:
       - run: npm ci
       - run: npm run check
       - run: npx tsc -p ../examples/plugins
+      # Type-level tests of the plugin API (generic settings, …).
+      - run: npx tsc -p ../packages/api/test
       - run: npm test
 
   web:

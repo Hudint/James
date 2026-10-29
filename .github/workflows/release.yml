@@ -1,0 +1,44 @@
+name: Release
+
+# Creates the GitHub release of a version tag with the plugin API package (@james/api) attached,
+# so plugin authors can install the types: npm i -D <release asset URL>.
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: read
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # The release step gets the token itself; nothing else in the job needs it.
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - name: Pack @james/api
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          test "$(node -p "require('./packages/api/package.json').version")" = "$version" \
+            || { echo "packages/api is not at version $version"; exit 1; }
+          grep -qx "version = \"$version\"" Cargo.toml \
+            || { echo "Cargo.toml is not at version $version"; exit 1; }
+          npm pack ./packages/api --pack-destination . --ignore-scripts
+          sha256sum "james-api-$version.tgz" > SHA256SUMS
+      - name: Create the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          # Re-runnable: an existing release only gets the files (again).
+          if ! gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            flags=()
+            case "$GITHUB_REF_NAME" in *-*) flags+=(--prerelease) ;; esac
+            gh release create "$GITHUB_REF_NAME" --verify-tag --generate-notes "${flags[@]}"
+          fi
+          gh release upload "$GITHUB_REF_NAME" --clobber "james-api-${GITHUB_REF_NAME#v}.tgz" SHA256SUMS

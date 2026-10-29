@@ -28,17 +28,29 @@
 
 // ---- plugin definition ----------------------------------------------------------------------
 
+/** A plugin's settings by name (see {@link ConfigField}); the type when none is declared. */
+export type PluginConfig = Record<string, unknown>;
+
 /** What a plugin module exports (see {@link definePlugin}). */
-export interface PluginDefinition {
+export interface PluginDefinition<Config extends object = PluginConfig> {
   /**
    * Called for every instance the plugin is activated on. May return a cleanup function
    * (also see {@link Bot.onStop}).
    */
-  setup(bot: Bot): void | (() => void | Promise<void>) | Promise<void | (() => void | Promise<void>)>;
+  setup(bot: Bot<Config>): void | (() => void | Promise<void>) | Promise<void | (() => void | Promise<void>)>;
 }
 
-/** Declares a plugin (identity function that gives `setup` its types). */
-export function definePlugin(definition: PluginDefinition): PluginDefinition;
+/**
+ * Declares a plugin (identity function that gives `setup` its types).
+ *
+ * The type argument types {@link Bot.config}, matching the manifest's `config` fields:
+ * `definePlugin<{ channel?: string; delay: number }>({ setup(bot) { … } })`. Fields without a
+ * `default` are missing until an administrator saves the settings, so declare those optional.
+ * The values are not checked against it at runtime.
+ */
+export function definePlugin<Config extends object = PluginConfig>(
+  definition: PluginDefinition<Config>,
+): PluginDefinition<Config>;
 
 // ---- manifest (package.json "james" section) ------------------------------------------------
 
@@ -111,11 +123,11 @@ export interface ConfigField {
 // ---- the bot ----------------------------------------------------------------------------------
 
 /** One instance as seen by a plugin. Everything is scoped to this instance. */
-export interface Bot {
+export interface Bot<Config extends object = PluginConfig> {
   /** The instance this plugin runs on. */
   readonly instance: InstanceInfo;
   /** This instance's values of the manifest's config fields (defaults applied). */
-  readonly config: Readonly<Record<string, unknown>>;
+  readonly config: Readonly<Config>;
   /** Writes to the James log. */
   readonly log: Logger;
   /** Private directory for the plugin's files (shared by all instances). */
@@ -233,7 +245,7 @@ export interface Bot {
    */
   notify(message: string): Promise<void>;
   /** Replaces this instance's configuration (persisted; {@link Bot.config} keeps the old values until restart). */
-  saveConfig(config: Record<string, unknown>): Promise<void>;
+  saveConfig(config: Config): Promise<void>;
   /** Version of James. */
   readonly version: string;
 }
