@@ -28,6 +28,7 @@ searching) are rate-limited per account (`429`).
 | `POST /instances`, `PUT/DELETE /instances/{id}` | `instance.manage` | Create, change, delete |
 | `POST /instances/{id}/start\|stop\|restart` | `instance.manage` | Connection |
 | `GET /instances/{id}/identity` / `PUT …` `{identity}` | `instance.manage` / administrators | The bot's identity (unique id; never the key) / use an existing one (TeamSpeak `123V…` or base64 key); a running bot reconnects |
+| `POST /instances/{id}/identity/export` `{password}` | administrators, login session only (no API token) | The bot's private identity as the TeamSpeak client exports it (`{identity: "123V…"}`). Secret: whoever has it connects as the bot. Needs the account's password again (accounts without a password, i.e. single sign-on only, cannot export); failed attempts are throttled like logins; logged, `no-store` |
 | `GET/PUT/DELETE /settings/youtube-cookies` (`PUT` `{content}`) | administrators | YouTube cookie file (status only, never the content) |
 | `GET /instances/{id}/status` | `instance.view` | Player status (incl. `speech`: texts being spoken or waiting) |
 | `POST /instances/{id}/play` `{input, mode}` | `playback.play` | Play a URL/search/path (`mode`: `now`, `next`, `append`) |

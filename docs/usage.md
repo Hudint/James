@@ -13,6 +13,8 @@
 - **Instance → Settings** – connection, audio, command prefix, voice, and the bot's **identity**:
   its unique ID, and an existing identity to use instead (exported from the TeamSpeak client via
   *Tools → Identities → Export*, or copied from SinusBot), so the bot keeps its server groups.
+  Administrators can also show the bot's private identity (after a warning and their password,
+  blurred until revealed) to copy it or download it as a file the TeamSpeak client imports.
 - **Users & roles** – accounts, roles and what they may do, per instance if needed.
 - **Settings** (administrators) – YouTube cookies.
 - **Account** – password, linked TeamSpeak identities, API tokens.

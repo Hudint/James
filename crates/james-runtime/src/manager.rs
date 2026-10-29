@@ -299,6 +299,22 @@ impl InstanceManager {
             .and_then(|data| factory.describe_credentials(&data)))
     }
 
+    /// An instance's stored credentials in importable form (secret, see
+    /// [`PlatformFactory::export_credentials`]) with what [`Self::credentials_info`] shows of
+    /// them (read together: the description matches the exported key); `None` if it has none
+    /// yet.
+    pub async fn export_credentials(
+        &self,
+        id: &str,
+    ) -> anyhow::Result<Option<(String, Option<serde_json::Value>)>> {
+        let factory = self.factory_of(id)?;
+        let Some(data) = self.services.store.load_credentials(id).await else {
+            return Ok(None);
+        };
+        let exported = factory.export_credentials(&data)?;
+        Ok(Some((exported, factory.describe_credentials(&data))))
+    }
+
     /// Replaces an instance's credentials with imported ones (e.g. an existing TeamSpeak
     /// identity). A running instance is stopped first (so it cannot store its old ones again)
     /// and restarted with them. Returns what [`Self::credentials_info`] shows.

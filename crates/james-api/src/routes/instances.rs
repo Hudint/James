@@ -26,6 +26,7 @@ pub fn routes() -> Router<AppState> {
         .route("/instances/{id}/stop", post(stop))
         .route("/instances/{id}/restart", post(restart))
         .route("/instances/{id}/identity", get(identity).put(import_identity))
+        .route("/instances/{id}/identity/export", post(export_identity))
         .route("/instances/{id}/status", get(status))
         .route("/instances/{id}/play", post(play))
         .route("/instances/{id}/skip", post(skip))
@@ -259,6 +260,89 @@ async fn import_identity(
         "identity imported"
     );
     Ok(Json(json!({ "identity": info })))
+}
+
+#[derive(Deserialize)]
+struct IdentityExport {
+    /// The account's password (accounts that have one).
+    #[serde(default)]
+    password: Option<String>,
+}
+
+/// The bot's identity including its private key, as the TeamSpeak client exports it (e.g. to
+/// move the bot elsewhere). Whoever has it connects as the bot with its server groups, for good
+/// (revoking anything in James does not take it back): administrators only, in a login session
+/// (no API token), proven again with the password; logged, never cached. Accounts without a
+/// password (single sign-on) cannot: the identity provider may sign them in again silently, so
+/// a fresh login proves nothing.
+async fn export_identity(
+    State(state): State<AppState>,
+    connect: Option<axum::Extension<axum::extract::ConnectInfo<std::net::SocketAddr>>>,
+    headers: axum::http::HeaderMap,
+    auth: Auth,
+    Path(id): Path<String>,
+    Json(body): Json<IdentityExport>,
+) -> ApiResult<impl axum::response::IntoResponse> {
+    if !auth.user.is_admin {
+        return Err(ApiError::forbidden());
+    }
+    let token = crate::auth::token_from_headers(&headers).unwrap_or_default();
+    if !state.db.is_session(&token).await? {
+        return Err(ApiError::new(
+            StatusCode::FORBIDDEN,
+            "the identity can only be exported in the web interface",
+        ));
+    }
+    if !auth.user.has_password {
+        return Err(ApiError::new(
+            StatusCode::FORBIDDEN,
+            "exporting the identity needs an account with a password",
+        ));
+    }
+    state.actions.check(auth.user.id)?;
+    config_of(&state, &id)?;
+    // Guessing is limited like logins.
+    let ip = crate::throttle::client_ip(&headers, connect.map(|c| c.0 .0), &state.trusted_proxies);
+    let attempt = crate::throttle::LoginKeys::new(&auth.user.username, ip);
+    if let Some(wait) = state.logins.blocked(&attempt) {
+        return Err(ApiError::new(
+            StatusCode::TOO_MANY_REQUESTS,
+            format!(
+                "too many failed attempts, try again in {} s",
+                wait.as_secs().max(1)
+            ),
+        ));
+    }
+    if let Some(delay) = state.logins.delay(&attempt) {
+        tokio::time::sleep(delay).await;
+    }
+    let password = body.password.unwrap_or_default();
+    if state
+        .db
+        .authenticate(&auth.user.username, &password)
+        .await?
+        .is_none()
+    {
+        state.logins.failed(&attempt);
+        return Err(ApiError::new(StatusCode::FORBIDDEN, "the password is wrong"));
+    }
+    state.logins.succeeded(&attempt);
+    let (exported, info) = state
+        .manager
+        .export_credentials(&id)
+        .await?
+        .ok_or_else(|| ApiError::not_found("identity"))?;
+    let uid = info
+        .as_ref()
+        .and_then(|i| i.get("uid"))
+        .and_then(Value::as_str)
+        .unwrap_or("?");
+    // Debug-formatted: names may contain line breaks (forged log lines).
+    tracing::warn!(instance = ?id, user = ?auth.user.username, user_id = auth.user.id, uid = %uid, "identity exported");
+    Ok((
+        [(axum::http::header::CACHE_CONTROL, "no-store")],
+        Json(json!({ "identity": exported })),
+    ))
 }
 
 /// The running instance, after checking `permission` for it.

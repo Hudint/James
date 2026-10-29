@@ -43,6 +43,9 @@ impl james_core::platform::PlatformFactory for FakePlatform {
         anyhow::ensure!(input.starts_with("key:"), "not an identity");
         Ok(json!({ "key": input }))
     }
+    fn export_credentials(&self, data: &Value) -> anyhow::Result<String> {
+        Ok(data["key"].as_str().unwrap_or_default().to_owned())
+    }
     fn describe_credentials(&self, data: &Value) -> Option<Value> {
         Some(json!({ "uid": format!("uid-of-{}", data["key"].as_str()?.len()) }))
     }
@@ -81,6 +84,7 @@ struct Response {
     body: Value,
     cookie: Option<String>,
     location: Option<String>,
+    cache_control: Option<String>,
 }
 
 impl Api {
@@ -154,12 +158,18 @@ impl Api {
             .get(header::LOCATION)
             .and_then(|v| v.to_str().ok())
             .map(str::to_owned);
+        let cache_control = response
+            .headers()
+            .get(header::CACHE_CONTROL)
+            .and_then(|v| v.to_str().ok())
+            .map(str::to_owned);
         let bytes = response.into_body().collect().await.unwrap().to_bytes();
         Response {
             status,
             body: serde_json::from_slice(&bytes).unwrap_or(Value::Null),
             cookie,
             location,
+            cache_control,
         }
     }
 
@@ -1048,7 +1058,7 @@ async fn sso_failures_redirect_with_fixed_codes() {
 }
 
 #[tokio::test]
-async fn identities_are_shown_to_instance_managers_and_replaced_by_admins() {
+async fn identities_are_shown_to_instance_managers_and_replaced_or_exported_by_admins() {
     let api = Api::new().await;
     api.manager
         .upsert(james_runtime::InstanceConfig {
@@ -1069,6 +1079,10 @@ async fn identities_are_shown_to_instance_managers_and_replaced_by_admins() {
         .unwrap();
     let admin = api.login("root", "root-password").await;
     let path = "/instances/bot/identity";
+    let export = "/instances/bot/identity/export";
+    let proof = || Some(json!({"password": "root-password"}));
+    let r = api.call(Method::POST, export, Some(&admin), proof()).await;
+    assert_eq!(r.status, StatusCode::NOT_FOUND, "nothing to export yet");
     let r = api.call(Method::GET, path, Some(&dj), None).await;
     assert_eq!(r.status, StatusCode::FORBIDDEN);
     let r = api
@@ -1125,6 +1139,94 @@ async fn identities_are_shown_to_instance_managers_and_replaced_by_admins() {
         !r.body.to_string().contains("secret"),
         "the key is never returned"
     );
+    for user in [&dj, &manager] {
+        let r = api
+            .call(
+                Method::POST,
+                export,
+                Some(user),
+                Some(json!({"password": "mgr-password"})),
+            )
+            .await;
+        assert_eq!(
+            r.status,
+            StatusCode::FORBIDDEN,
+            "exporting the key is for administrators"
+        );
+    }
+    let r = api.call(Method::GET, export, Some(&admin), None).await;
+    assert_eq!(r.status, StatusCode::METHOD_NOT_ALLOWED, "never a plain GET");
+    for body in [json!({}), json!({"password": "wrong"})] {
+        let r = api.call(Method::POST, export, Some(&admin), Some(body)).await;
+        assert_eq!(r.status, StatusCode::FORBIDDEN, "the password is proven again");
+        assert!(!r.body.to_string().contains("secret"));
+    }
+    let root = api.db.user_by_name("root").await.unwrap();
+    let api_token = api
+        .db
+        .create_token(root.id, james_db::tokens::TokenKind::Api, "script", None)
+        .await
+        .unwrap();
+    let r = api.call(Method::POST, export, Some(&api_token), proof()).await;
+    assert_eq!(
+        r.status,
+        StatusCode::FORBIDDEN,
+        "never with an API token: {}",
+        r.body
+    );
+    let r = api.call(Method::POST, export, Some(&admin), proof()).await;
+    assert_eq!(
+        (r.status, r.body),
+        (StatusCode::OK, json!({"identity": "key:secret"}))
+    );
+    assert_eq!(r.cache_control.as_deref(), Some("no-store"));
+    // Single sign-on accounts have no password, and a fresh login proves nothing (the identity
+    // provider may sign them in silently).
+    let sso = api.db.create_oidc_user("sso", "issuer#sso", &[]).await.unwrap();
+    api.db.set_admin(sso.id, true).await.unwrap();
+    let session = api
+        .db
+        .create_token(sso.id, james_db::tokens::TokenKind::Session, "web", Some(3600))
+        .await
+        .unwrap();
+    let r = api
+        .call(
+            Method::POST,
+            export,
+            Some(&format!("james_session={session}")),
+            Some(json!({})),
+        )
+        .await;
+    assert_eq!(r.status, StatusCode::FORBIDDEN, "{}", r.body);
+    // Guessing the password is throttled like logins, the right one included while blocked.
+    let mut blocked = false;
+    for _ in 0..20 {
+        let r = api
+            .call(
+                Method::POST,
+                export,
+                Some(&admin),
+                Some(json!({"password": "guess"})),
+            )
+            .await;
+        if r.status == StatusCode::TOO_MANY_REQUESTS {
+            blocked = true;
+            break;
+        }
+        assert_eq!(r.status, StatusCode::FORBIDDEN);
+    }
+    assert!(blocked, "wrong passwords are throttled");
+    let r = api.call(Method::POST, export, Some(&admin), proof()).await;
+    assert_eq!(r.status, StatusCode::TOO_MANY_REQUESTS);
+    let r = api
+        .call(
+            Method::POST,
+            "/instances/nope/identity/export",
+            Some(&admin),
+            proof(),
+        )
+        .await;
+    assert_eq!(r.status, StatusCode::NOT_FOUND);
 
     let r = api
         .call(Method::GET, "/instances/nope/identity", Some(&manager), None)

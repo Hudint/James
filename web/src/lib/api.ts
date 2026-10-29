@@ -132,6 +132,14 @@ export const api = {
       `/instances/${enc(id)}/identity`,
       { identity },
     ),
+  /** The private identity (secret): only after the user asked for it. */
+  /** `password`: the account's own, proving it again. */
+  exportIdentity: (id: string, password: string) =>
+    request<{ identity: string }>(
+      "POST",
+      `/instances/${enc(id)}/identity/export`,
+      { password },
+    ),
 
   status: (id: string) =>
     request<InstanceStatus>("GET", `/instances/${enc(id)}/status`),

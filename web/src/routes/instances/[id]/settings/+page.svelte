@@ -104,7 +104,7 @@
     <p class="error-text" role="alert">{error}</p>
   {:else if config}
     <InstanceForm bind:config isNew={false} {busy} {dirty} channels={sameServer ? channels : null} onchannelsneeded={loadChannels} onsubmit={save} />
-    {#if config.platform === 'teamspeak'}<IdentityCard {id} />{/if}
+    {#if config.platform === 'teamspeak'}<IdentityCard {id} nickname={typeof config.settings.nickname === 'string' ? config.settings.nickname : undefined} />{/if}
     <section class="card danger stack">
       <h2>{t('config.dangerZone')}</h2>
       <p class="muted small">{t('config.deleteHint')}</p>

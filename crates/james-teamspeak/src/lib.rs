@@ -142,6 +142,14 @@ impl PlatformFactory for TeamSpeakFactory {
         })?)
     }
 
+    fn export_credentials(&self, data: &serde_json::Value) -> anyhow::Result<String> {
+        // Without the parse error: it may quote the stored key.
+        let identity = serde_json::from_value::<Credentials>(data.clone())
+            .map_err(|_| anyhow::anyhow!("the stored identity is unreadable"))?
+            .identity;
+        Ok(export_identity(&identity))
+    }
+
     fn describe_credentials(&self, data: &serde_json::Value) -> Option<serde_json::Value> {
         let identity = serde_json::from_value::<Credentials>(data.clone()).ok()?.identity;
         Some(serde_json::json!({
@@ -180,6 +188,12 @@ pub fn import_identity(input: &str) -> anyhow::Result<Identity> {
         identity.upgrade_level(MIN_SECURITY_LEVEL);
     }
     Ok(identity)
+}
+
+/// An identity as the TeamSpeak client exports it (`<counter>V<obfuscated key>`), readable by
+/// [`import_identity`], the TeamSpeak client and SinusBot.
+pub fn export_identity(identity: &Identity) -> String {
+    format!("{}V{}", identity.counter(), identity.key().to_ts_obfuscated())
 }
 
 fn parse_settings(settings: &serde_json::Value) -> anyhow::Result<TeamSpeakConfig> {
@@ -1036,7 +1050,7 @@ mod identity_import_tests {
         assert!(from_key.level() >= MIN_SECURITY_LEVEL, "raised to a usable level");
 
         // As the TeamSpeak client exports it (counter, `V`, obfuscated key), also as file line.
-        let exported = format!("{}V{}", from_key.counter(), from_key.key().to_ts_obfuscated());
+        let exported = export_identity(&from_key);
         for input in [
             exported.clone(),
             format!("identity=\"{exported}\""),
@@ -1051,6 +1065,16 @@ mod identity_import_tests {
 
         assert!(import_identity("").is_err());
         assert!(import_identity("not an identity").is_err());
+    }
+
+    #[test]
+    fn stored_credentials_are_exported_in_importable_form() {
+        let factory = TeamSpeakFactory;
+        let stored = factory.import_credentials(KEY).unwrap();
+        let exported = factory.export_credentials(&stored).unwrap();
+        let again = factory.import_credentials(&exported).unwrap();
+        assert_eq!(again, stored, "the export imports as the same identity");
+        assert!(factory.export_credentials(&serde_json::json!({})).is_err());
     }
 
     #[test]

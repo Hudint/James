@@ -519,6 +519,13 @@ pub trait PlatformFactory: Send + Sync {
         anyhow::bail!("this platform has no credentials to import")
     }
 
+    /// Stored credentials in the form an administrator could import them again elsewhere (e.g.
+    /// the TeamSpeak client's `123V…`). Secret: only for explicit exports.
+    fn export_credentials(&self, data: &serde_json::Value) -> anyhow::Result<String> {
+        let _ = data;
+        anyhow::bail!("this platform has no credentials to export")
+    }
+
     /// What may be shown about stored credentials (e.g. the identity's public unique id; never
     /// secrets). `None` if there is nothing to show.
     fn describe_credentials(&self, data: &serde_json::Value) -> Option<serde_json::Value> {
