@@ -51,4 +51,17 @@
   .auth :global(form) {
     text-align: left;
   }
+  /* Small phones: the page is the card (no frame eating the width). */
+  @media (max-width: 400px) {
+    .wrap {
+      justify-content: flex-start;
+      padding-top: var(--space-6);
+    }
+    .auth {
+      border: none;
+      box-shadow: none;
+      background: none;
+      padding-inline: var(--space-2);
+    }
+  }
 </style>

@@ -245,10 +245,22 @@
     justify-content: flex-end;
     gap: var(--space-3);
     flex-wrap: wrap;
-    padding: var(--space-3) var(--space-4);
-    margin: 0 calc(-1 * var(--space-4)) calc(-1 * var(--space-6));
+    padding: var(--space-3) var(--space-4) calc(var(--space-3) + env(safe-area-inset-bottom));
+    margin: 0 calc(-1 * var(--page-pad, var(--space-4)));
     background: color-mix(in srgb, var(--bg) 92%, transparent);
     backdrop-filter: blur(6px);
     border-top: 1px solid var(--border);
+  }
+  /* Phones: the main action across the width, within thumb reach. */
+  @media (max-width: 600px) {
+    .savebar .btn {
+      flex: 1 1 100%;
+    }
+  }
+  /* Wider screens: the bar ends flush with the page bottom, as before. */
+  @media (min-width: 601px) {
+    .savebar {
+      margin-bottom: calc(-1 * var(--space-6));
+    }
   }
 </style>

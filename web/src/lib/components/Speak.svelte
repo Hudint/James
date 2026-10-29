@@ -52,6 +52,8 @@
   }
 
   async function stop() {
+    // The stop button goes away once nothing is spoken: keep focus in the card.
+    document.getElementById('speak-input')?.focus();
     try {
       await api.stopSpeech(id);
       void refreshStatus(id);
@@ -83,7 +85,7 @@
     ></textarea>
     <div class="hint-row">
       <p id="speak-hint" class="hint">
-        {#if offline}{t('speak.offline')}{:else}{t('speak.hint')}<span class="keys"> {t('speak.keys')}</span>{/if}
+        {#if offline}{t('speak.offline')}{:else}{t('speak.hint')}{' '}<span class="keys">{t('speak.keys')}</span>{/if}
       </p>
       {#if length > MAX * 0.8}
         <span class="hint count" class:over={tooLong} aria-live="polite">{t('speak.count', { count: length, max: MAX })}</span>
@@ -93,9 +95,11 @@
       <button class="btn btn-primary" type="submit" disabled={!text.trim() || busy || offline || tooLong} aria-busy={busy}>
         <Icon name="volume" size={16} />{busy ? t('speak.sending') : t('speak.say')}
       </button>
-      <button class="btn" type="button" onclick={stop} disabled={!speaking}>
-        <Icon name="stop" size={16} />{t('speak.stop')}
-      </button>
+      {#if speaking}
+        <button class="btn" type="button" onclick={stop}>
+          <Icon name="stop" size={16} />{t('speak.stop')}
+        </button>
+      {/if}
     </div>
   </form>
 </section>

@@ -76,12 +76,14 @@
   <div class="info">
     <h2 id="now-playing-title" class="label muted">{t('player.nowPlaying')}</h2>
     {#if track}
-      <p class="title truncate" title={track.title}>{track.title}</p>
-      <p class="artist truncate muted">
-        {[track.artist, status.current?.requestedBy ? t('player.requestedBy', { name: status.current.requestedBy.name }) : null]
-          .filter(Boolean)
-          .join(' · ')}
-      </p>
+      <p class="title clamp" title={track.title}>{track.title}</p>
+      {#if track.artist}<p class="artist truncate muted">{track.artist}</p>{/if}
+      {#if status.loading || status.current?.requestedBy}
+        <p class="requested muted small" aria-live="polite">
+          {#if status.loading}<span class="badge">{t('player.loading')}</span>{/if}
+          {#if status.current?.requestedBy}<span class="truncate">{t('player.requestedBy', { name: status.current.requestedBy.name })}</span>{/if}
+        </p>
+      {/if}
     {:else}
       <p class="title">{t('player.nothing')}</p>
       <p class="muted small">{t('player.nothingHint')}</p>
@@ -89,7 +91,7 @@
   </div>
 
   <div class="progress">
-    {#if status.loading}
+    {#if status.loading && !track}
       <p class="muted small" aria-live="polite">{t('player.loading')}</p>
     {:else if track && track.isStream}
       <span class="badge danger"><span class="dot"></span>{t('player.live')}</span>
@@ -214,6 +216,25 @@
     font-size: var(--text-xl);
     font-weight: 650;
   }
+  /* Long titles get two lines before they are cut. */
+  .clamp {
+    display: -webkit-box;
+    -webkit-line-clamp: 2;
+    line-clamp: 2;
+    -webkit-box-orient: vertical;
+    overflow: hidden;
+    overflow-wrap: anywhere;
+  }
+  .requested {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: var(--space-1) var(--space-2);
+    min-width: 0;
+  }
+  .requested .truncate {
+    min-width: 0;
+  }
   .progress {
     grid-area: progress;
     display: flex;
@@ -249,6 +270,31 @@
     min-width: 3.5em;
     text-align: right;
     font-variant-numeric: tabular-nums;
+  }
+  /* Phones: smaller cover, controls spread across the width within thumb reach. */
+  @media (max-width: 600px) {
+    .player {
+      grid-template-columns: 72px 1fr;
+      gap: var(--space-3);
+    }
+    .art {
+      width: 72px;
+      height: 72px;
+    }
+    .title {
+      font-size: var(--text-lg);
+    }
+    .controls {
+      justify-content: space-between;
+      gap: 0;
+    }
+    .controls :global(.icon-btn:not(.large)) {
+      width: clamp(40px, 12vw, 48px);
+      height: clamp(40px, 12vw, 48px);
+    }
+    .volume {
+      max-width: none;
+    }
   }
   @media (min-width: 720px) {
     .player {

@@ -19,7 +19,8 @@
   .toasts {
     position: fixed;
     right: var(--space-4);
-    bottom: var(--space-4);
+    /* Above the mini player (its height includes the safe area), else above the safe area. */
+    bottom: calc(var(--space-4) + var(--bottom-bar, env(safe-area-inset-bottom)));
     left: var(--space-4);
     display: flex;
     flex-direction: column;
@@ -27,6 +28,7 @@
     gap: var(--space-2);
     z-index: 100;
     pointer-events: none;
+    transition: bottom 0.15s;
   }
   .toast {
     pointer-events: auto;
@@ -55,5 +57,14 @@
   }
   .text {
     flex: 1;
+  }
+  /* Phones: full width, easy to read and to dismiss. */
+  @media (max-width: 600px) {
+    .toasts {
+      align-items: stretch;
+    }
+    .toast {
+      max-width: none;
+    }
   }
 </style>

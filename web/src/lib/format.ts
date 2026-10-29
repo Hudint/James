@@ -10,5 +10,7 @@ export function formatDuration(ms: number | null | undefined): string {
 }
 
 export function trackLabel(track: { title: string; artist: string | null }): string {
-  return track.artist ? `${track.artist} – ${track.title}` : track.title;
+  // Many titles already name the artist ("Daft Punk - Get Lucky"): no need to repeat it.
+  if (!track.artist || track.title.toLowerCase().startsWith(track.artist.toLowerCase())) return track.title;
+  return `${track.artist} – ${track.title}`;
 }

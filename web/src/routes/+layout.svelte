@@ -253,7 +253,7 @@
     align-items: center;
     gap: var(--space-2);
     height: 56px;
-    padding: 0 var(--space-2);
+    padding: 0 max(var(--space-2), env(safe-area-inset-right)) 0 max(var(--space-2), env(safe-area-inset-left));
     background: var(--surface);
     border-bottom: 1px solid var(--border);
   }

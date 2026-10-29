@@ -235,6 +235,9 @@
                 <button class="btn btn-small" onclick={() => startEdit(user)}>{t('common.edit')}</button>
                 {#if user.id !== session.me?.user.id}
                   <button class="icon-btn small" onclick={() => deleteUser(user)} aria-label="{t('common.delete')}: {user.username}"><Icon name="trash" size={16} /></button>
+                {:else}
+                  <!-- Keeps the edit buttons of all rows aligned. -->
+                  <span class="icon-slot" aria-hidden="true"></span>
                 {/if}
               {/if}
             </div>
@@ -358,6 +361,15 @@
   .grow {
     flex: 1;
     min-width: 0;
+  }
+  .icon-slot {
+    width: 32px;
+    flex-shrink: 0;
+  }
+  @media (pointer: coarse) {
+    .icon-slot {
+      width: 40px;
+    }
   }
   .nowrap-row {
     flex-wrap: nowrap;

@@ -649,6 +649,21 @@
   .actions {
     flex-wrap: wrap;
   }
+  /* Phones: buttons in an even two-column grid instead of ragged rows. */
+  @media (max-width: 600px) {
+    .actions {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+    }
+    .actions > :global(*) {
+      width: 100%;
+      min-width: 0;
+    }
+    .actions .open-page,
+    .actions > :global(:last-child:nth-child(odd)) {
+      grid-column: 1 / -1;
+    }
+  }
   .settings {
     display: flex;
     flex-direction: column;

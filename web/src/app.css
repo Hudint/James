@@ -52,7 +52,6 @@
     --surface-2: #22222b;
     --surface-3: #2c2c37;
     --border: #33333f;
-  --input-border: #6e6e82;
     --input-border: #6e6e82;
     --text: #ececf1;
     --text-muted: #a3a3b2;
@@ -220,9 +219,14 @@ kbd {
 
 /* Page structure ------------------------------------------------------------------- */
 .page {
+  --page-pad: var(--space-4);
   max-width: 1200px;
   margin: 0 auto;
-  padding: var(--space-5) var(--space-4) var(--space-6);
+  /* The bottom leaves room for a bar fixed there (mini player on phones). */
+  padding: var(--space-5) var(--page-pad) calc(var(--space-6) + var(--bottom-bar, 0px));
+  /* Phones in landscape: keep clear of the notch. */
+  padding-left: max(var(--page-pad), env(safe-area-inset-left));
+  padding-right: max(var(--page-pad), env(safe-area-inset-right));
   display: flex;
   flex-direction: column;
   gap: var(--space-5);
@@ -293,6 +297,7 @@ kbd {
 
 /* Buttons -------------------------------------------------------------------------- */
 .btn {
+  text-decoration: none;
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -312,9 +317,11 @@ kbd {
     background 0.12s,
     border-color 0.12s;
 }
-.btn:hover:not(:disabled) {
-  background: var(--surface-2);
-  text-decoration: none;
+@media (hover: hover) {
+  .btn:hover:not(:disabled) {
+    background: var(--surface-2);
+    text-decoration: none;
+  }
 }
 .btn:disabled {
   opacity: 0.55;
@@ -325,9 +332,18 @@ kbd {
   border-color: var(--accent);
   color: var(--accent-contrast);
 }
-.btn-primary:hover:not(:disabled) {
-  background: var(--accent-hover);
-  border-color: var(--accent-hover);
+@media (hover: hover) {
+  .btn-primary:hover:not(:disabled) {
+    background: var(--accent-hover);
+    border-color: var(--accent-hover);
+  }
+}
+/* Clearly inactive (a dimmed accent still looks clickable, especially in dark mode). */
+.btn-primary:disabled {
+  background: var(--surface-3);
+  border-color: var(--surface-3);
+  color: var(--text-muted);
+  opacity: 1;
 }
 .btn-danger {
   color: var(--danger);
@@ -357,8 +373,10 @@ kbd {
   cursor: pointer;
   flex-shrink: 0;
 }
-.icon-btn:hover:not(:disabled) {
-  background: var(--surface-2);
+@media (hover: hover) {
+  .icon-btn:hover:not(:disabled) {
+    background: var(--surface-2);
+  }
 }
 .icon-btn:disabled {
   opacity: 0.4;
@@ -511,8 +529,10 @@ input[type='range'] {
   border-radius: var(--radius);
   min-height: 48px;
 }
-.list > li:hover {
-  background: var(--surface-2);
+@media (hover: hover) {
+  .list > li:hover {
+    background: var(--surface-2);
+  }
 }
 .table-wrap {
   overflow-x: auto;
@@ -545,5 +565,61 @@ tr:last-child td {
   * {
     transition: none !important;
     animation: none !important;
+  }
+}
+
+/* Phones and tablets ------------------------------------------------------------------- */
+/* Fingers need bigger targets than mouse pointers (at least 44 px). */
+@media (pointer: coarse) {
+  .btn {
+    min-height: 44px;
+  }
+  .btn-small {
+    min-height: 40px;
+  }
+  .icon-btn {
+    width: 44px;
+    height: 44px;
+  }
+  .icon-btn.small {
+    width: 40px;
+    height: 40px;
+  }
+  input[type='text'],
+  input[type='password'],
+  input[type='search'],
+  input[type='number'],
+  input[type='url'],
+  select {
+    min-height: 44px;
+  }
+}
+@media (max-width: 600px) {
+  /* Forms of a text field plus controls: the field gets its own full row. */
+  form.row {
+    flex-wrap: wrap !important;
+  }
+  form.row > input.grow {
+    flex: 1 1 100% !important;
+  }
+  /* Below 16 px, iOS zooms into a field when it is tapped. */
+  input,
+  select,
+  textarea {
+    font-size: 16px;
+  }
+}
+@media (max-width: 600px) {
+  .page-header h1 {
+    font-size: var(--text-xl);
+  }
+}
+@media (max-width: 480px) {
+  .page {
+    --page-pad: var(--space-3);
+    gap: var(--space-4);
+  }
+  .card {
+    padding: var(--space-3);
   }
 }

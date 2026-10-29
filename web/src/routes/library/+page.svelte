@@ -116,7 +116,9 @@
     {#if can('library.manage')}
       <input bind:this={fileInput} type="file" accept="audio/*" multiple class="visually-hidden" id="upload" onchange={() => upload()} />
       <label for="upload" class="btn" class:disabled={uploading}><Icon name="upload" size={16} />{uploading ? t('library.uploading') : t('library.upload')}</label>
-      <button class="btn" onclick={scan} disabled={scanning}><Icon name="refresh" size={16} />{t('library.scan')}</button>
+      <button class="btn rescan" onclick={scan} disabled={scanning} aria-label={t('library.scan')} title={t('library.scan')}>
+        <Icon name="refresh" size={16} /><span class="label-text">{t('library.scan')}</span>
+      </button>
     {/if}
   </header>
 
@@ -269,6 +271,15 @@
     }
     .show-sm {
       display: block;
+    }
+  }
+  /* Phones: upload and rescan stay in one row (rescan as an icon). */
+  @media (max-width: 600px) {
+    .rescan .label-text {
+      display: none;
+    }
+    .rescan {
+      padding: 0 var(--space-3);
     }
   }
 </style>

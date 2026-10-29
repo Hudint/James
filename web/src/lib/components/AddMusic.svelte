@@ -4,7 +4,12 @@
   import { t } from '$lib/i18n/index.svelte';
   import { reportError, toast } from '$lib/session.svelte';
   import type { PlayMode, QueueItem, Track } from '$lib/types';
+  import { mediaQuery } from '$lib/media.svelte';
+  import ActionMenu from './ActionMenu.svelte';
   import Icon from './Icon.svelte';
+
+  // Phones: one row (field, main action, menu); what people type there is mostly a search.
+  const phone = mediaQuery('(max-width: 600px)');
 
   let { id }: { id: string } = $props();
 
@@ -68,15 +73,51 @@
   }
 
   // Enter adds to the queue: in a shared channel replacing the current song must be deliberate.
+  // On phones Enter does what the main button shows (search for text, add for links).
   function submit(event: SubmitEvent) {
     event.preventDefault();
-    void add('append');
+    if (phone.matches && !isUrl(input.trim())) void search();
+    else void add('append');
   }
 </script>
 
 <section class="card add" aria-labelledby="add-label">
   <form class="stack-sm" onsubmit={submit}>
     <label id="add-label" for="add-input" class="label">{t('player.addLabel')}</label>
+    {#if phone.matches}
+      <div class="compact">
+        <div class="input-row">
+          <Icon name="search" size={18} />
+          <input
+            id="add-input"
+            type="text"
+            bind:value={input}
+            placeholder={t('player.addPlaceholderShort')}
+            autocomplete="off"
+            enterkeyhint={isUrl(input.trim()) ? 'go' : 'search'}
+            aria-busy={busy !== null}
+          />
+        </div>
+        {#if isUrl(input.trim())}
+          <button class="btn btn-primary" type="submit" disabled={busy !== null} aria-busy={busy !== null} aria-label={t('player.addToQueue')}>
+            <span class:spin={busy !== null}><Icon name={busy !== null ? 'refresh' : 'plus'} size={18} /></span>
+          </button>
+        {:else}
+          <button class="btn btn-primary" type="button" onclick={search} disabled={!input.trim() || busy !== null} aria-busy={busy === 'search'} aria-label={busy === 'search' ? t('player.searching') : t('common.search')}>
+            <span class:spin={busy !== null}><Icon name={busy !== null ? 'refresh' : 'search'} size={18} /></span>
+          </button>
+        {/if}
+        <ActionMenu
+          label={t('common.moreActions')}
+          title={input.trim() || t('player.addLabel')}
+          items={[
+            { label: t('player.addToQueue'), icon: 'plus', disabled: !input.trim() || busy !== null, onclick: () => add('append') },
+            { label: t('player.playNext'), icon: 'next', disabled: !input.trim() || busy !== null, onclick: () => add('next') },
+            { label: t('player.playNow'), icon: 'play', disabled: !input.trim() || busy !== null, onclick: () => add('now') },
+          ]}
+        />
+      </div>
+    {:else}
     <div class="input-row">
       <Icon name="search" size={18} />
       <input
@@ -106,6 +147,7 @@
         </button>
       {/if}
     </div>
+    {/if}
   </form>
 
   {#if results}
@@ -134,8 +176,24 @@
               {/if}
               <div class="meta">
                 <span class="truncate" title={trackLabel(track)}>{track.title}</span>
-                <span class="truncate muted small">{track.artist ?? ''}</span>
+                <span class="truncate muted small">
+                  {#if phone.matches}{[track.artist, track.isStream ? t('player.live') : track.durationMs ? formatDuration(track.durationMs) : null].filter(Boolean).join(' · ')}{:else}{track.artist ?? ''}{/if}
+                </span>
               </div>
+              {#if phone.matches}
+                <button class="icon-btn small" onclick={() => addResult(track, 'append')} aria-label="{t('player.addToQueue')}: {track.title}">
+                  <Icon name="plus" size={18} />
+                </button>
+                <ActionMenu
+                  small
+                  label="{t('common.moreActions')}: {track.title}"
+                  title={track.title}
+                  items={[
+                    { label: t('player.playNow'), icon: 'play', onclick: () => addResult(track, 'now') },
+                    { label: t('player.playNext'), icon: 'next', onclick: () => addResult(track, 'next') },
+                  ]}
+                />
+              {:else}
               <span class="muted small duration">{track.isStream ? t('player.live') : formatDuration(track.durationMs)}</span>
               <div class="actions">
                 <button class="icon-btn small" onclick={() => addResult(track, 'now')} aria-label="{t('player.playNow')}: {track.title}" title={t('player.playNow')}>
@@ -148,6 +206,7 @@
                   <Icon name="plus" size={16} />
                 </button>
               </div>
+              {/if}
             </li>
           {/each}
         </ul>
@@ -175,6 +234,42 @@
   }
   .input-row input {
     padding-left: 40px;
+  }
+  /* Phones: field, main action and menu in one row. */
+  .compact {
+    display: grid;
+    grid-template-columns: 1fr auto auto;
+    gap: var(--space-2);
+    align-items: center;
+  }
+  .compact .btn {
+    padding: 0 var(--space-3);
+  }
+  .spin {
+    display: inline-grid;
+    animation: spin 1s linear infinite;
+  }
+  @keyframes spin {
+    to {
+      transform: rotate(360deg);
+    }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .spin {
+      animation: none;
+    }
+  }
+  /* Phones: result titles get two lines before they are cut. */
+  @media (max-width: 600px) {
+    .results .meta > :first-child {
+      display: -webkit-box;
+      -webkit-line-clamp: 2;
+      line-clamp: 2;
+      -webkit-box-orient: vertical;
+      white-space: normal;
+      overflow: hidden;
+      overflow-wrap: anywhere;
+    }
   }
   .results {
     border-top: 1px solid var(--border);

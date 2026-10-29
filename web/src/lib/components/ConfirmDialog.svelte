@@ -42,4 +42,20 @@
     gap: var(--space-2);
     margin-top: var(--space-5);
   }
+  /* Phones: at the bottom, buttons full width within thumb reach. */
+  @media (max-width: 600px) {
+    dialog {
+      margin: auto 0 0;
+      width: 100%;
+      max-width: none;
+      border-radius: var(--radius-lg) var(--radius-lg) 0 0;
+      padding-bottom: calc(var(--space-5) + env(safe-area-inset-bottom));
+    }
+    .actions {
+      flex-direction: column-reverse;
+    }
+    .actions .btn {
+      width: 100%;
+    }
+  }
 </style>

@@ -77,4 +77,15 @@
     color: var(--text);
     box-shadow: var(--shadow);
   }
+  /* Phones: full width, big enough for a thumb. */
+  @media (max-width: 600px) {
+    .tabs {
+      width: 100%;
+    }
+    button {
+      flex: 1;
+      justify-content: center;
+      min-height: 44px;
+    }
+  }
 </style>

@@ -1,11 +1,14 @@
 <script lang="ts">
+  import { tick } from 'svelte';
   import { goto } from '$app/navigation';
   import { page } from '$app/state';
   import { api } from '$lib/api';
   import { confirmAction } from '$lib/confirm.svelte';
+  import ActionMenu from '$lib/components/ActionMenu.svelte';
   import AddMusic from '$lib/components/AddMusic.svelte';
   import Speak from '$lib/components/Speak.svelte';
   import Icon from '$lib/components/Icon.svelte';
+  import MiniPlayer from '$lib/components/MiniPlayer.svelte';
   import Player from '$lib/components/Player.svelte';
   import Queue from '$lib/components/Queue.svelte';
   import ServerTree from '$lib/components/ServerTree.svelte';
@@ -23,6 +26,16 @@
   let tab = $state<'player' | 'server'>('player');
   // Tabs only exist on narrow screens; on wide screens both panels are shown side by side.
   const narrow = mediaQuery('(max-width: 1099px)');
+  // Phones: the instance actions go into a menu next to the title.
+  const phone = mediaQuery('(max-width: 600px)');
+  let playerCard = $state<HTMLElement | null>(null);
+
+  /** From the mini player on the server tab: to the player, with keyboard focus there. */
+  async function showPlayerTab() {
+    tab = 'player';
+    await tick();
+    playerCard?.querySelector<HTMLElement>('button:not(:disabled)')?.focus();
+  }
 
   let loadId = 0;
   async function load(instanceId: string) {
@@ -118,8 +131,19 @@
             <span class="badge success"><span class="dot"></span>{t('instance.connected')}</span>
           {/if}
         </span>
+        {#if phone.matches && status && can('instance.manage', id)}
+          <ActionMenu
+            label={t('common.moreActions')}
+            title={summary.name}
+            items={[
+              { label: t('instance.restart'), icon: 'refresh', disabled: busy, onclick: () => lifecycle('restart') },
+              { label: t('instance.settings'), icon: 'settings', href: `/instances/${id}/settings` },
+              { label: t('instance.stop'), icon: 'power', danger: true, disabled: busy, onclick: () => lifecycle('stop') },
+            ]}
+          />
+        {/if}
       </div>
-      {#if can('instance.manage', id)}
+      {#if can('instance.manage', id) && !(phone.matches && status)}
         <div class="row actions">
           {#if status}
             <button class="btn" disabled={busy} onclick={() => lifecycle('restart')}><Icon name="refresh" size={16} />{t('instance.restart')}</button>
@@ -156,6 +180,10 @@
         />
       {/if}
 
+      <!-- Phones: the main controls stay at hand below the player and on the server tab. -->
+      {#if phone.matches}
+        <MiniPlayer {id} {status} player={tab === 'player' ? playerCard : null} always={tab === 'server'} onshowplayer={tab === 'server' ? showPlayerTab : undefined} />
+      {/if}
       <div class="layout">
         {#if !narrow.matches || tab === 'player'}
           <div
@@ -164,11 +192,9 @@
             role={narrow.matches ? 'tabpanel' : undefined}
             aria-labelledby={narrow.matches ? 'tab-player' : undefined}
           >
-            <Player {id} {status} />
+            <div class="player-anchor" bind:this={playerCard}><Player {id} {status} /></div>
             {#if can('playback.play', id)}<AddMusic {id} />{/if}
             <Queue {id} items={entry?.queue ?? []} />
-            <!-- Narrow screens: below the queue (it matters more while music plays). -->
-            {#if narrow.matches && can('tts.say', id)}<Speak {id} {status} />{/if}
             {#if can('playback.control', id)}<p class="hint shortcuts">{t('player.shortcuts')}</p>{/if}
           </div>
         {/if}
@@ -184,7 +210,8 @@
             {:else}
               <div class="card empty"><p>{t('server.noData')}</p></div>
             {/if}
-            {#if !narrow.matches && can('tts.say', id)}<Speak {id} {status} />{/if}
+            <!-- Speaking concerns the channel: next to the server view (its own tab on phones). -->
+            {#if can('tts.say', id)}<Speak {id} {status} />{/if}
           </div>
         {/if}
       </div>
@@ -227,5 +254,15 @@
       grid-template-columns: minmax(0, 1fr) 340px;
       align-items: start;
     }
+  }
+  /* Keyboard shortcuts mean nothing on touch screens and phones. */
+  @media (hover: none), (max-width: 600px) {
+    .shortcuts {
+      display: none;
+    }
+  }
+  /* Scrolled to from the mini player: not under the sticky top bar. */
+  .player-anchor {
+    scroll-margin-top: 64px;
   }
 </style>

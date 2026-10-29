@@ -110,7 +110,8 @@
     display: flex;
     align-items: center;
     gap: var(--space-3);
-    margin: var(--space-4) 0;
+    /* The card's gap already spaces it evenly. */
+    margin: 0;
     color: var(--text-muted);
     font-size: var(--text-sm);
   }

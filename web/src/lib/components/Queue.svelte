@@ -7,9 +7,14 @@
   import { can, reportError, toast } from '$lib/session.svelte';
   import type { QueueItem } from '$lib/types';
   import { tick } from 'svelte';
+  import { mediaQuery } from '$lib/media.svelte';
+  import ActionMenu, { type MenuItem } from './ActionMenu.svelte';
   import Icon from './Icon.svelte';
 
   let { id, items }: { id: string; items: QueueItem[] } = $props();
+
+  // Phones: one compact line per track, its actions in a menu.
+  const phone = mediaQuery('(max-width: 600px)');
 
   let manage = $derived(can('queue.manage', id));
   let control = $derived(can('playback.control', id));
@@ -56,7 +61,23 @@
     const row = list?.querySelector<HTMLElement>(`[data-item="${item.id}"]`);
     const preferred = row?.querySelector<HTMLButtonElement>(`[data-action="${direction}"]`);
     const fallback = row?.querySelector<HTMLButtonElement>(`[data-action="${direction === 'up' ? 'down' : 'up'}"]`);
-    (preferred && !preferred.disabled ? preferred : fallback)?.focus();
+    // On phones the row has only its menu button.
+    const menu = row?.querySelector<HTMLButtonElement>('[data-action="menu"]');
+    (preferred && !preferred.disabled ? preferred : (fallback ?? menu))?.focus();
+  }
+
+  function itemActions(item: QueueItem, index: number): MenuItem[] {
+    const actions: MenuItem[] = [];
+    if (control) actions.push({ label: t('queue.playThis'), icon: 'play', onclick: () => playNow(item) });
+    if (manage) {
+      actions.push(
+        { label: t('queue.moveTop'), icon: 'top', disabled: index === 0, onclick: () => move(item, 0, 'up') },
+        { label: t('queue.moveUp'), icon: 'up', disabled: index === 0, onclick: () => move(item, index - 1, 'up') },
+        { label: t('queue.moveDown'), icon: 'down', disabled: index === items.length - 1, onclick: () => move(item, index + 1, 'down') },
+        { label: t('queue.remove'), icon: 'trash', danger: true, onclick: () => remove(item, index) },
+      );
+    }
+    return actions;
   }
 
   async function remove(item: QueueItem, index: number) {
@@ -98,13 +119,25 @@
     {#if items.length > 0}
       <span class="muted small summary">{t('queue.count', { count: items.length, duration: formatDuration(total) })}</span>
     {/if}
-    {#if manage && items.length > 1}
-      <button class="icon-btn small" onclick={() => run(() => api.shuffleQueue(id))} aria-label={t('queue.shuffle')} title={t('queue.shuffle')}>
-        <Icon name="shuffle" size={16} />
-      </button>
-    {/if}
-    {#if manage && items.length > 0}
-      <button class="btn btn-small btn-danger" onclick={clear}>{t('queue.clear')}</button>
+    {#if manage && items.length > 0 && phone.matches}
+      <ActionMenu
+        small
+        label="{t('common.moreActions')}: {t('queue.title')}"
+        title={t('queue.title')}
+        items={[
+          { label: t('queue.shuffle'), icon: 'shuffle', disabled: items.length < 2, onclick: () => run(() => api.shuffleQueue(id)) },
+          { label: t('queue.clear'), icon: 'trash', danger: true, onclick: clear },
+        ]}
+      />
+    {:else}
+      {#if manage && items.length > 1}
+        <button class="icon-btn small" onclick={() => run(() => api.shuffleQueue(id))} aria-label={t('queue.shuffle')} title={t('queue.shuffle')}>
+          <Icon name="shuffle" size={16} />
+        </button>
+      {/if}
+      {#if manage && items.length > 0}
+        <button class="btn btn-small btn-danger" onclick={clear}>{t('queue.clear')}</button>
+      {/if}
     {/if}
   </div>
 
@@ -129,6 +162,12 @@
             </span>
           </div>
           <span class="muted small duration">{item.track.isStream ? t('player.live') : formatDuration(item.track.durationMs)}</span>
+          {#if phone.matches}
+            {@const actions = itemActions(item, index)}
+            {#if actions.length}
+              <ActionMenu small label="{t('common.moreActions')}: {item.track.title}" title={item.track.title} items={actions} />
+            {/if}
+          {:else}
           <div class="actions">
             {#if control}
               <button class="icon-btn small" onclick={() => playNow(item)} aria-label="{t('queue.playThis')}: {item.track.title}" title={t('queue.playThis')}>
@@ -161,6 +200,7 @@
               </button>
             {/if}
           </div>
+          {/if}
         </li>
       {/each}
     </ol>
@@ -216,18 +256,18 @@
   .card-header {
     flex-wrap: wrap;
   }
-  /* Phones: actions get their own line so the title keeps the full width. */
+  /* Phones: no scroll area inside the scrolling page (it traps the thumb). */
   @media (max-width: 600px) {
+    .queue {
+      max-height: none;
+      overflow: visible;
+    }
     .queue li {
-      flex-wrap: wrap;
+      gap: var(--space-2);
+      padding-inline: 0;
     }
-    .meta {
-      flex-basis: calc(100% - 7em);
-    }
-    .actions {
-      width: 100%;
-      justify-content: flex-end;
-      margin-top: calc(-1 * var(--space-1));
+    .position {
+      width: 1.5em;
     }
   }
 </style>
