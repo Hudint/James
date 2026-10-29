@@ -235,6 +235,20 @@ export const api = {
       "POST",
       `/instances/${enc(instance)}/plugins/${enc(id)}/token`,
     ),
+  /** Activates or deactivates a plugin on one instance; `permissions` replaces the granted ones. */
+  setPluginActive: (
+    instance: string,
+    id: string,
+    body: { active: boolean; permissions?: string[] },
+  ) =>
+    request<PluginInfo>(
+      "PUT",
+      `/instances/${enc(instance)}/plugins/${enc(id)}`,
+      body,
+    ),
+  /** Replaces the granted permissions, keeping where the plugin runs (`enable`: also enables it). */
+  setPluginPermissions: (id: string, permissions: string[], enable = false) =>
+    request<PluginInfo>("PUT", `/plugins/${enc(id)}/permissions`, { permissions, enable }),
   pluginConfigs: (id: string) =>
     request<Record<string, Record<string, unknown>>>(
       "GET",

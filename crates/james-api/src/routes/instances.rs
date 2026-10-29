@@ -190,6 +190,7 @@ async fn remove(State(state): State<AppState>, auth: Auth, Path(id): Path<String
         .await
         .map_err(configure_error)?;
     if let Some(plugins) = &state.plugins {
+        plugins.forget_instance(&id).await;
         plugins.reconcile().await;
     }
     Ok(StatusCode::NO_CONTENT)

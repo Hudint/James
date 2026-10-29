@@ -761,6 +761,119 @@ impl PluginManager {
         permissions: Vec<String>,
         instances: Option<Vec<String>>,
     ) -> Result<PluginInfo, ConfigureError> {
+        self.update_state(id, |_| Change {
+            enabled,
+            permissions,
+            instances,
+            only_removes: false,
+        })
+        .await
+    }
+
+    /// Replaces the granted permissions (and enables the plugin with `enable`), keeping where it
+    /// runs; also restarts it (e.g. after it failed).
+    pub async fn set_permissions(
+        &self,
+        id: &str,
+        permissions: Vec<String>,
+        enable: bool,
+    ) -> Result<PluginInfo, ConfigureError> {
+        self.update_state(id, |state| Change {
+            enabled: state.enabled || enable,
+            permissions,
+            instances: state.instances.clone(),
+            only_removes: false,
+        })
+        .await
+    }
+
+    /// Activates or deactivates a plugin on one instance, keeping the others. `permissions`
+    /// replaces the granted ones (`None` keeps them); `all` lists every instance: a plugin that
+    /// was active on all of them gets an explicit list (instances created later are not
+    /// included), and ids of deleted instances are dropped. Not for `autorun` plugins (they run
+    /// on every instance).
+    pub async fn set_active(
+        &self,
+        id: &str,
+        instance: &str,
+        active: bool,
+        permissions: Option<Vec<String>>,
+        all: &[String],
+    ) -> Result<PluginInfo, ConfigureError> {
+        if self
+            .inner
+            .read()
+            .plugins
+            .get(id)
+            .is_some_and(|e| e.manifest.autorun)
+        {
+            return Err(ConfigureError::Invalid(
+                "this plugin always runs on every instance".into(),
+            ));
+        }
+        self.update_state(id, |state| {
+            let mut instances = match (&state.instances, state.enabled) {
+                (_, false) => Vec::new(),
+                (None, true) => all.to_vec(),
+                (Some(list), true) => list.clone(),
+            };
+            instances.retain(|i| i != instance && all.contains(i));
+            if active {
+                instances.push(instance.to_owned());
+            }
+            let only_removes = !active && permissions.is_none();
+            Change {
+                enabled: !instances.is_empty(),
+                permissions: permissions.unwrap_or_else(|| state.granted_permissions.clone()),
+                instances: Some(instances),
+                only_removes,
+            }
+        })
+        .await
+    }
+
+    /// Forgets a deleted instance in every plugin's instance list (the database was updated
+    /// with the instance's deletion).
+    pub async fn forget_instance(&self, instance: &str) {
+        let _discovery = self.discovery.read().await;
+        let ids: Vec<String> = self.inner.read().plugins.keys().cloned().collect();
+        for id in ids {
+            // Under the plugin's lock: a change in progress cannot write the old list back.
+            let lock = self.plugin_lock(&id);
+            let _guard = lock.lock().await;
+            let state = {
+                let inner = self.inner.read();
+                let Some(entry) = inner.plugins.get(&id) else {
+                    continue;
+                };
+                let Some(list) = &entry.state.instances else {
+                    continue;
+                };
+                if !list.iter().any(|i| i == instance) {
+                    continue;
+                }
+                let mut state = entry.state.clone();
+                let list: Vec<String> = list.iter().filter(|i| *i != instance).cloned().collect();
+                state.enabled = state.enabled && !list.is_empty();
+                state.instances = Some(list);
+                state
+            };
+            if let Err(e) = self.db.save_plugin_state(&state).await {
+                tracing::warn!(plugin = %id, error = %e, "cannot save the plugin's instances");
+            }
+            if let Some(entry) = self.inner.write().plugins.get_mut(&id) {
+                entry.state = state;
+            }
+        }
+    }
+
+    /// Replaces a plugin's state with what `change` makes of the current one (under the
+    /// plugin's lock), saves it and restarts the plugin.
+    async fn update_state(
+        &self,
+        id: &str,
+        change: impl FnOnce(&PluginState) -> Change,
+    ) -> Result<PluginInfo, ConfigureError> {
         if !self.inner.read().plugins.contains_key(id) {
             return Err(ConfigureError::NotFound);
         }
@@ -771,10 +884,22 @@ impl PluginManager {
             let state = {
                 let inner = self.inner.read();
                 let entry = inner.plugins.get(id).ok_or(ConfigureError::NotFound)?;
+                let Change {
+                    enabled,
+                    permissions,
+                    mut instances,
+                    only_removes,
+                } = change(&entry.state);
+                // Only instances that exist (one may have been deleted meanwhile).
+                if let Some(list) = &mut instances {
+                    let existing: Vec<String> = self.instances.configs().into_iter().map(|c| c.id).collect();
+                    list.retain(|i| existing.contains(i));
+                }
                 if let Some(unknown) = permissions.iter().find(|p| manifest::permission(p).is_none()) {
                     return Err(ConfigureError::Invalid(format!("unknown permission '{unknown}'")));
                 }
-                if enabled {
+                // Taking it off an instance needs no approval of what an update asks for.
+                if enabled && !only_removes {
                     if let Some(missing) = entry
                         .manifest
                         .permissions
@@ -1230,9 +1355,18 @@ fn info(id: &str, entry: &Entry, contexts: &BTreeSet<(String, String)>) -> Plugi
     }
 }
 
-/// Validates a discovered manifest. Discovery ran plugin code, so where a plugin's code
-/// lives is derived here from its id and kind; discovery only picks the entry module inside
-/// the plugin's own directory and its web directory.
+/// A new plugin state (see `PluginManager::update_state`).
+struct Change {
+    enabled: bool,
+    permissions: Vec<String>,
+    instances: Option<Vec<String>>,
+    /// Only takes the plugin off instances: needs no newly requested permission.
+    only_removes: bool,
+}
+
+/// Validates a discovered manifest. Discovery ran plugin code (in probe processes), so where a
+/// plugin's code lives is derived here from its id and kind; discovery only picks the entry
+/// module inside the plugin's own directory and its web directory.
 fn check_manifest(
     root: &std::path::Path,
     manifest: &mut Manifest,
@@ -1256,7 +1390,11 @@ fn check_manifest(
     let reported = manifest.paths.take().ok_or("the plugin's files are unknown")?;
     let canonical = |path: &std::path::Path| std::fs::canonicalize(path).ok();
     let (dir, entry, own, readable) = match manifest.kind {
-        manifest::PluginKind::James => {
+        // A directory plugin, unless discovery read a single file `<id>.ts` (a directory of the
+        // same name next to it does not change that).
+        manifest::PluginKind::James
+            if reported.entry.parent().and_then(canonical).as_deref() != Some(root) =>
+        {
             let dir = canonical(&root.join(&manifest.id))
                 .filter(|d| d.parent() == Some(root) && d.is_dir())
                 .ok_or("the plugin directory is missing")?;
@@ -1264,6 +1402,20 @@ fn check_manifest(
                 .filter(|e| e.starts_with(&dir) && *e != dir && e.is_file())
                 .ok_or("the entry point is outside the plugin's directory")?;
             (dir.clone(), entry, dir.clone(), vec![dir])
+        }
+        manifest::PluginKind::James => {
+            // A single file `<id>.ts`, not a symlink; it may use the shared `node_modules`.
+            let entry = root.join(format!("{}.ts", manifest.id));
+            if !std::fs::symlink_metadata(&entry).is_ok_and(|m| m.is_file()) {
+                return Err("the plugin file is missing".into());
+            }
+            let mut readable = vec![entry.clone()];
+            let modules = root.join("node_modules");
+            if std::fs::symlink_metadata(&modules).is_ok_and(|m| m.is_dir()) {
+                readable.push(modules);
+            }
+            // No web page: `own` is a directory that does not exist.
+            (root.to_path_buf(), entry, root.join(&manifest.id), readable)
         }
         manifest::PluginKind::Sinusbot => {
             // `<id>.js` (the file name may differ in case), not a symlink.

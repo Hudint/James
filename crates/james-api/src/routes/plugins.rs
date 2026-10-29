@@ -45,7 +45,9 @@ pub fn routes() -> Router<AppState> {
         .route("/plugins", get(list))
         .route("/plugins/reload", post(reload))
         .route("/plugins/{id}", put(configure))
+        .route("/plugins/{id}/permissions", put(set_permissions))
         .route("/plugins/{id}/config", get(configs))
+        .route("/instances/{instance}/plugins/{id}", put(set_active))
         .route("/instances/{instance}/plugins/{id}/config", put(set_config))
         .route("/instances/{instance}/plugins/{id}/token", post(token))
         .route(
@@ -135,6 +137,58 @@ async fn configure(
     }
     let info = plugins(&state)?
         .configure(&id, body.enabled, body.permissions, body.instances)
+        .await
+        .map_err(configure_error)?;
+    Ok(Json(info))
+}
+
+#[derive(Deserialize)]
+struct SetActive {
+    active: bool,
+    /// Replaces the granted permissions (they apply on every instance); omitted = unchanged.
+    #[serde(default)]
+    permissions: Option<Vec<String>>,
+}
+
+/// Activates or deactivates a plugin on one instance.
+async fn set_active(
+    State(state): State<AppState>,
+    auth: Auth,
+    Path((instance, id)): Path<(String, String)>,
+    Json(body): Json<SetActive>,
+) -> ApiResult<Json<james_plugins::PluginInfo>> {
+    // Permissions are granted for the whole plugin: managers of all plugins only.
+    auth.require("plugins.manage", None)?;
+    if state.manager.config(&instance).is_none() {
+        return Err(ApiError::not_found("instance"));
+    }
+    let all: Vec<String> = state.manager.configs().into_iter().map(|c| c.id).collect();
+    let info = plugins(&state)?
+        .set_active(&id, &instance, body.active, body.permissions, &all)
+        .await
+        .map_err(configure_error)?;
+    Ok(Json(info))
+}
+
+#[derive(Deserialize)]
+struct SetPermissions {
+    permissions: Vec<String>,
+    /// Enables a disabled plugin (where it was active before).
+    #[serde(default)]
+    enable: bool,
+}
+
+/// Replaces a plugin's granted permissions (they apply on every instance it is active on),
+/// keeping where it runs; restarts it.
+async fn set_permissions(
+    State(state): State<AppState>,
+    auth: Auth,
+    Path(id): Path<String>,
+    Json(body): Json<SetPermissions>,
+) -> ApiResult<Json<james_plugins::PluginInfo>> {
+    auth.require("plugins.manage", None)?;
+    let info = plugins(&state)?
+        .set_permissions(&id, body.permissions, body.enable)
         .await
         .map_err(configure_error)?;
     Ok(Json(info))

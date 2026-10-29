@@ -278,4 +278,68 @@ async fn plugins_run_end_to_end() {
 
     // Enabling without the requested permission is refused.
     assert!(plugins.configure("greeter", true, vec![], None).await.is_err());
+
+    // Per instance: on for one keeps the granted permissions; a plugin that was active on all
+    // instances gets an explicit list; off for the last one disables it.
+    let all = ["test".to_owned(), "other".to_owned()];
+    plugins
+        .configure("greeter", true, vec!["web".into()], None)
+        .await
+        .unwrap();
+    let info = plugins
+        .set_active("greeter", "other", false, None, &all)
+        .await
+        .unwrap();
+    assert!(info.state.enabled);
+    assert_eq!(info.state.instances, Some(vec!["test".to_owned()]));
+    assert_eq!(info.state.granted_permissions, vec!["web".to_owned()]);
+    wait("greeter active on test", || {
+        plugins.has_context("greeter", "test")
+    })
+    .await;
+    let info = plugins
+        .set_active("greeter", "test", false, None, &all)
+        .await
+        .unwrap();
+    assert!(!info.state.enabled);
+    assert_eq!(info.state.instances, Some(vec![]));
+    assert!(!plugins.has_context("greeter", "test"));
+    let info = plugins
+        .set_active("greeter", "test", true, None, &all)
+        .await
+        .unwrap();
+    assert_eq!(info.state.instances, Some(vec!["test".to_owned()]));
+    wait("greeter active again on test", || {
+        plugins.has_context("greeter", "test")
+    })
+    .await;
+    // Without the requested permission it cannot be activated, but it can always be taken off
+    // an instance (e.g. while an update waits for approval).
+    plugins
+        .configure("greeter", true, vec![], Some(vec!["test".into(), "other".into()]))
+        .await
+        .unwrap_err();
+    plugins.configure("greeter", false, vec![], None).await.unwrap();
+    assert!(plugins
+        .set_active("greeter", "test", true, None, &all)
+        .await
+        .is_err());
+    let info = plugins
+        .set_active("greeter", "test", true, Some(vec!["web".into()]), &all)
+        .await
+        .unwrap();
+    assert_eq!(info.state.instances, Some(vec!["test".to_owned()]));
+    // Permissions change without touching where it runs.
+    let info = plugins
+        .set_permissions("greeter", vec!["web".into()], false)
+        .await
+        .unwrap();
+    assert_eq!(info.state.instances, Some(vec!["test".to_owned()]));
+    assert!(info.state.enabled);
+    // Only instances that exist are kept (this test runtime has only "test").
+    let info = plugins
+        .set_active("greeter", "other", true, None, &all)
+        .await
+        .unwrap();
+    assert_eq!(info.state.instances, Some(vec!["test".to_owned()]));
 }

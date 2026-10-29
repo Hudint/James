@@ -41,16 +41,75 @@ export interface PluginDefinition<Config extends object = PluginConfig> {
 }
 
 /**
+ * What a plugin in a single file (`plugins/<id>.ts`) declares about itself, next to `setup`.
+ * James reads it when it scans the plugins, by running the file's top level in a sandbox where
+ * imports do nothing (so `config` may be built with code, e.g. `events.flatMap(…)`); `setup`
+ * only runs once the plugin is activated. Plugins in a directory declare this in the
+ * `package.json` instead (see {@link Manifest}).
+ */
+export interface PluginInfo {
+  name?: string;
+  version?: string;
+  description?: string;
+  author?: string;
+  /** Required James version, e.g. `">=0.6.0"`. */
+  engine?: string;
+  /** Permissions the plugin needs; an administrator confirms them when activating it. */
+  permissions?: readonly Permission[];
+  /** Permissions the plugin can use when granted, but runs without. */
+  optionalPermissions?: readonly Permission[];
+  /** Platforms the plugin supports (default: all). */
+  platforms?: readonly Platform[];
+  /** Always active on every instance. */
+  autorun?: boolean;
+  /** Hidden from the plugin list (only sensible with `autorun`). */
+  hidden?: boolean;
+}
+
+/** The value a setting of `Field`'s type holds. */
+export type ConfigFieldValue<Field> = Field extends { type: 'checkbox' }
+  ? boolean
+  : Field extends { type: 'number' | 'select' }
+    ? number
+    : Field extends { type: 'strings' | 'tracks' }
+      ? string[]
+      : Field extends { type: 'array'; vars: infer Vars extends readonly ConfigField[] }
+        ? ConfigValues<Vars>[]
+        : Field extends { type: 'array' }
+          ? Record<string, unknown>[]
+          : string;
+
+/**
+ * The settings of a list of fields by name: fields with a `default` are always set, the
+ * others are missing until an administrator saves them.
+ */
+export type ConfigValues<Fields extends readonly ConfigField[]> = {
+  [F in Fields[number] as F extends { default: unknown } ? F['name'] : never]: ConfigFieldValue<F>;
+} & {
+  [F in Fields[number] as F extends { default: unknown } ? never : F['name']]?: ConfigFieldValue<F>;
+};
+
+/**
  * Declares a plugin (identity function that gives `setup` its types).
  *
- * The type argument types {@link Bot.config}, matching the manifest's `config` fields:
- * `definePlugin<{ channel?: string; delay: number }>({ setup(bot) { … } })`. Fields without a
- * `default` are missing until an administrator saves the settings, so declare those optional.
- * The values are not checked against it at runtime.
+ * With `config`, {@link Bot.config} is typed from the fields: a `checkbox` is a boolean, a
+ * `number` or `select` (the option's index) a number, and so on. Fields built in a callback
+ * (e.g. `flatMap`) need `as const` there to keep their names. In a single-file plugin the
+ * other {@link PluginInfo} fields declare the plugin. The values are not checked at runtime.
+ */
+export function definePlugin<const Fields extends readonly ConfigField[]>(
+  definition: PluginInfo & { config: Fields } & PluginDefinition<ConfigValues<Fields>>,
+): PluginDefinition<ConfigValues<Fields>>;
+/**
+ * Declares a plugin without settings, or with settings typed by hand (`definePlugin<Config>`,
+ * e.g. for a plugin whose fields are in its package.json).
  */
 export function definePlugin<Config extends object = PluginConfig>(
-  definition: PluginDefinition<Config>,
+  definition: PluginInfo & PluginDefinition<Config>,
 ): PluginDefinition<Config>;
+
+/** Keeps config fields defined apart from {@link definePlugin} typed (names and types). */
+export function defineConfig<const Fields extends readonly ConfigField[]>(fields: Fields): Fields;
 
 // ---- manifest (package.json "james" section) ------------------------------------------------
 
@@ -106,11 +165,11 @@ export interface ConfigField {
   /** Hint shown in empty text and number inputs. */
   placeholder?: string;
   /** `select`: the options; the stored value is the index. */
-  options?: string[];
+  options?: readonly string[];
   /** `array`: fields of each item. */
-  vars?: ConfigField[];
+  vars?: readonly ConfigField[];
   /** Only shown when every condition matches another field's value. */
-  conditions?: {
+  conditions?: readonly {
     /** `name` of the other field. */
     field: string;
     /** Value the other field must have (compared loosely, so `1` matches `"1"`). */

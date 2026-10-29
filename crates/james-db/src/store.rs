@@ -133,6 +133,24 @@ impl Db {
             .bind(format!("instance:{instance}"))
             .execute(&mut *tx)
             .await?;
+        // Plugins active on it: a new instance with the same id must not inherit them.
+        let lists: Vec<(String, String)> =
+            sqlx::query_as("SELECT id, instances FROM plugins WHERE instances IS NOT NULL")
+                .fetch_all(&mut *tx)
+                .await?;
+        for (plugin, list) in lists {
+            let mut ids: Vec<String> = serde_json::from_str(&list).unwrap_or_default();
+            if !ids.iter().any(|i| i == instance) {
+                continue;
+            }
+            ids.retain(|i| i != instance);
+            sqlx::query("UPDATE plugins SET instances = ?, enabled = enabled AND ? WHERE id = ?")
+                .bind(serde_json::to_string(&ids)?)
+                .bind(!ids.is_empty())
+                .bind(&plugin)
+                .execute(&mut *tx)
+                .await?;
+        }
         tx.commit().await?;
         Ok(())
     }
@@ -216,6 +234,21 @@ mod tests {
             instances: Some(vec!["a".into()]),
         };
         db.save_plugin_state(&state).await.unwrap();
-        assert_eq!(db.plugin_states().await.unwrap(), vec![state]);
+        assert_eq!(db.plugin_states().await.unwrap(), vec![state.clone()]);
+
+        // A deleted instance leaves the plugins' lists (a new one with that id does not get them).
+        let both = PluginState {
+            id: "both".into(),
+            instances: Some(vec!["a".into(), "b".into()]),
+            ..state.clone()
+        };
+        db.save_plugin_state(&both).await.unwrap();
+        db.delete_plugin_instance_data("a").await.unwrap();
+        let states = db.plugin_states().await.unwrap();
+        let get = |id: &str| states.iter().find(|s| s.id == id).unwrap().clone();
+        assert_eq!(get("both").instances, Some(vec!["b".to_string()]));
+        assert!(get("both").enabled);
+        assert_eq!(get("greeter").instances, Some(vec![]));
+        assert!(!get("greeter").enabled, "active nowhere any more");
     }
 }

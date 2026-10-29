@@ -81,7 +81,7 @@ class Host {
   }
 
   static async discover(dir: string): Promise<any> {
-    const host = new Host(['--permission', `--allow-fs-read=${hostDir}`, `--allow-fs-read=${dir}`]);
+    const host = new Host(['--permission', '--allow-child-process', `--allow-fs-read=${hostDir}`, `--allow-fs-read=${dir}`]);
     try {
       await host.conn.request('init', { protocol: 1, version: '0.1.0' });
       return await host.conn.request('discover', { pluginsDir: dir });
@@ -205,9 +205,59 @@ test('discovery rejects duplicate ids and scripts escaping the probe', async () 
   assert.match(errors.twin, /two plugins/);
   assert.ok(errors.escape, 'escape attempt fails');
   assert.ok(errors.escape2, 'escape through the global object fails');
-  assert.equal(errors.getter, 'the script failed while being read');
-  assert.equal(errors.proxy, 'the script failed while being read');
+  assert.equal(errors.getter, 'the plugin failed while being read');
+  assert.equal(errors.proxy, 'the plugin failed while being read');
   assert.ok(errors.spin, 'microtask loop is stopped');
+});
+
+test('single-file plugins: the manifest comes from definePlugin(), read in a sandbox', async () => {
+  const dir = path.join(tmp, 'single');
+  fs.mkdirSync(dir, { recursive: true });
+  const marker = path.join(tmp, 'single-pwned');
+  fs.writeFileSync(
+    path.join(dir, 'afk.ts'),
+    `import { definePlugin, type Client } from '@james/api';
+     import fs, {
+       // comment
+       writeFileSync, /* another */
+     } from 'node:fs';
+     const events = [{ name: 'clientMute', title: 'Mic' }, { name: 'clientAway', title: 'Away' }] as const;
+     writeFileSync(${JSON.stringify(marker)}, 'x');
+     export default definePlugin({
+       name: 'AFK', version: '1.2.0', permissions: ['moderation'],
+       config: events.flatMap(({ name, title }) => [{ name: \`\${name}Active\`, title, type: 'checkbox' }] as const),
+       setup(bot) { fs.writeFileSync(${JSON.stringify(marker)}, 'setup ran'); },
+     });`,
+  );
+  // import() would hand out an error of the host realm (its Function constructor).
+  fs.writeFileSync(
+    path.join(dir, 'escape.ts'),
+    `import { definePlugin } from '@james/api';
+     let leaked = 'no';
+     import('x').catch((e: any) => { try { leaked = typeof e.constructor.constructor('return process')(); } catch { leaked = 'blocked'; } });
+     export default definePlugin({ name: 'E', get version() { return leaked; }, setup() {} });`,
+  );
+  fs.writeFileSync(path.join(dir, 'later.ts'), `try { new FinalizationRegistry(() => { for (;;) {} }).register({}, 1); } catch {}\nimport { definePlugin } from '@james/api';\nexport default definePlugin({ name: 'L', setup() {} });`);
+  fs.writeFileSync(path.join(dir, 'hog.ts'), `const a: string[] = []; for (;;) a.push('x'.repeat(1e6));`);
+  fs.writeFileSync(path.join(dir, 'plain.ts'), `export const x = 1;`);
+  // Nesting deeper than James parses must only fail this plugin.
+  fs.writeFileSync(path.join(dir, 'deep.ts'), `import { definePlugin } from '@james/api';\nlet o: any = 1; for (let i = 0; i < 200; i++) o = [o];\nexport default definePlugin({ name: 'D', config: [{ name: 'a', title: 'a', type: 'select', options: o }], setup() {} });`);
+  fs.writeFileSync(path.join(dir, 'wasm.ts'), `import { definePlugin } from '@james/api';\nexport default definePlugin({ name: typeof WebAssembly + '/' + typeof ArrayBuffer, setup() {} });`);
+  const result = await Host.discover(dir);
+  const byId = Object.fromEntries(result.plugins.map((p: any) => [p.id, p]));
+  const errors = Object.fromEntries(result.errors.map((e: any) => [e.id, e.error]));
+  assert.equal(byId.afk.name, 'AFK');
+  assert.equal(byId.afk.kind, 'james');
+  assert.deepEqual(byId.afk.permissions, ['moderation']);
+  assert.deepEqual(byId.afk.config.map((f: any) => f.name), ['clientMuteActive', 'clientAwayActive']);
+  assert.equal(byId.afk.paths.entry, path.join(dir, 'afk.ts'));
+  assert.ok(!fs.existsSync(marker), 'imports are inert and setup does not run');
+  assert.notEqual(byId.escape?.version, 'object', 'import() does not reach the host');
+  assert.equal(byId.later?.name, 'L', 'a FinalizationRegistry callback does not hang discovery');
+  assert.ok(errors.hog, 'memory is limited');
+  assert.match(errors.plain, /definePlugin/);
+  assert.match(errors.deep, /nested too deeply/);
+  assert.equal(byId.wasm.name, 'undefined/undefined', 'no memory outside the limited heap');
 });
 
 test('native plugin: events, commands, store, web', async () => {

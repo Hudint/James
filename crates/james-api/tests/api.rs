@@ -1300,3 +1300,39 @@ async fn youtube_cookies_are_managed_by_administrators() {
     assert_eq!(r.status, StatusCode::NO_CONTENT);
     assert!(!stored.exists());
 }
+
+#[tokio::test]
+async fn plugin_activation_and_permissions_need_plugins_manage_on_all_instances() {
+    let api = Api::new().await;
+    api.manager
+        .upsert(james_runtime::InstanceConfig {
+            id: "bot".into(),
+            platform: "fake".into(),
+            ..Default::default()
+        })
+        .unwrap();
+    let scoped = Grant {
+        permission: "plugins.manage".into(),
+        instance: Some("bot".into()),
+    };
+    let (_, manager) = api.user_with_grants("scoped", &[scoped]).await;
+    let (_, admin) = api
+        .user_with_grants("global", &[Grant::global("plugins.manage")])
+        .await;
+    for (method, path, body) in [
+        (Method::PUT, "/instances/bot/plugins/p", json!({"active": true})),
+        (Method::PUT, "/plugins/p/permissions", json!({"permissions": []})),
+    ] {
+        let r = api
+            .call(method.clone(), path, Some(&manager), Some(body.clone()))
+            .await;
+        assert_eq!(
+            r.status,
+            StatusCode::FORBIDDEN,
+            "{path}: grants apply on every instance"
+        );
+        // Allowed; plugins are off in this test.
+        let r = api.call(method, path, Some(&admin), Some(body)).await;
+        assert_eq!(r.status, StatusCode::SERVICE_UNAVAILABLE, "{path}: {}", r.body);
+    }
+}

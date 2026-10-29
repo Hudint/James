@@ -20,40 +20,56 @@ Contents: [Quick start](#quick-start) · [Manifest](#manifest) · [Lifecycle](#l
 
 ## Quick start
 
-1. Create a directory in the plugin folder (`<data_dir>/plugins/`, configurable with
-   `plugins.dir`). Its name is the plugin id (lowercase letters, digits, `-`, `_`, `.`).
-2. Add a `package.json` with a `james` section and an entry module:
-
-   ```json
-   {
-     "name": "welcome",
-     "version": "1.0.0",
-     "description": "Greets clients that join the server",
-     "type": "module",
-     "main": "index.ts",
-     "james": {
-       "config": [
-         { "name": "message", "title": "Greeting", "type": "string", "default": "Welcome, {name}!" }
-       ]
-     }
-   }
-   ```
+1. Create a file in the plugin folder (`<data_dir>/plugins/`, configurable with `plugins.dir`).
+   Its name is the plugin id (lowercase letters, digits, `-`, `_`), e.g. `welcome.ts`:
 
    ```ts
-   // index.ts
    import { definePlugin } from '@james/api';
 
    export default definePlugin({
+     name: 'Welcome',
+     version: '1.0.0',
+     description: 'Greets clients that join the server',
+     config: [{ name: 'message', title: 'Greeting', type: 'string', default: 'Welcome, {name}!' }],
      setup(bot) {
        bot.on('clientJoin', async ({ client }) => {
-         await client.chat(String(bot.config.message).replace('{name}', client.name));
+         await client.chat(bot.config.message.replace('{name}', client.name)); // typed: string
        });
      },
    });
    ```
 
-3. In the web interface open **Plugins**, click **Rescan**, then **Enable**. Choose the instances
-   the plugin should run on and adjust its settings.
+2. In the web interface open **Plugins**, choose the instance at the top, click **Rescan**, then
+   **Enable**. Plugins are activated and configured per instance.
+
+Everything besides `setup` describes the plugin (name, version, `permissions`, `config`, …, see
+[Manifest](#manifest)). James reads it when it scans the plugins by running the file's top level
+in a sandbox: imports do nothing there and `setup` does not run, so the settings may be built
+with code:
+
+```ts
+const events = [{ name: 'clientMute', title: 'Microphone muted' }, { name: 'clientAway', title: 'Away' }] as const;
+
+export default definePlugin({
+  name: 'AFK mover',
+  permissions: ['moderation'],
+  config: events.flatMap(({ name, title }) => [
+    { name: `${name}Active`, title: `${title}: active`, type: 'checkbox' },
+    { name: `${name}Channel`, title: `${title}: channel`, type: 'channel' },
+  ] as const),
+  setup(bot) {
+    bot.config.clientMuteActive; // boolean | undefined
+  },
+});
+```
+
+`bot.config` is typed from the fields (fields built in a callback need `as const` to keep their
+names). The top level gets one second and little memory there, and cannot use `await`.
+
+Every `.ts` file directly in the plugin folder is a plugin, and it can only use npm packages
+from the folder's `node_modules` (not other files next to it). Larger plugins (several files, a
+web page, their own npm packages) are a directory with a `package.json` whose `james` section
+holds the same fields, and an entry module (`main`).
 
 TypeScript runs directly (Node.js strips the types, no build step). Use only erasable syntax:
 no `enum`, `namespace` or constructor parameter properties.
@@ -92,7 +108,9 @@ implicitly has an 'any' type*).
 
 ## Manifest
 
-The `james` section of `package.json`:
+The fields next to `setup` in a single-file plugin, or the `james` section of a directory
+plugin's `package.json` (there `name`, `version`, `description` and `author` are the
+package's own fields):
 
 | Field | Type | Meaning |
 |---|---|---|

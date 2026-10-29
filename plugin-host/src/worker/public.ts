@@ -6,3 +6,7 @@ export function definePlugin<T extends { setup: (bot: any) => unknown }>(definit
   }
   return definition;
 }
+
+export function defineConfig<T>(fields: T): T {
+  return fields;
+}

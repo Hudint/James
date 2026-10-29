@@ -554,7 +554,7 @@ async function onRequest(method: string, params: any): Promise<unknown> {
       version = String(params.version ?? '');
       return { protocol: PROTOCOL_VERSION, node: process.version };
     case 'discover': {
-      const result = discover(String(params?.pluginsDir ?? ''), version);
+      const result = await discover(String(params?.pluginsDir ?? ''), version);
       return {
         plugins: result.plugins.map((d) => ({ ...d.manifest, webDir: d.webDir, paths: { dir: d.dir, entry: d.entry, readable: d.readable } })),
         errors: result.errors,

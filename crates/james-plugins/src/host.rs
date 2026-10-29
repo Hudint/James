@@ -81,7 +81,12 @@ fn allow(flag: &str, paths: &[&Path]) -> Vec<OsString> {
 pub(crate) async fn discover(settings: &PluginSettings) -> anyhow::Result<Discovery> {
     check_host_dir(settings)?;
     let host = host_dir(settings);
-    let mut args = vec![OsString::from("--permission")];
+    // Discovery runs no plugin code itself: single files are read by probe processes of their
+    // own (see plugin-host/src/probe.ts), which it starts.
+    let mut args = vec![
+        OsString::from("--permission"),
+        OsString::from("--allow-child-process"),
+    ];
     args.extend(allow("--allow-fs-read", &[&host, &settings.plugins_dir]));
     let (mut child, stream) = spawn(settings, args, "discovery", &settings.plugins_dir)?;
     let (peer, connection) = ipc::connect(stream, Arc::new(Refuse), 4);

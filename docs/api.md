@@ -47,6 +47,8 @@ searching) are rate-limited per account (`429`).
 | `GET/POST /users`, `GET/PATCH/DELETE /users/{id}`, `GET /users/{id}/identities` | `users.manage` | Accounts (`oidcSubject` and `isAdmin` only by administrators) |
 | `GET/POST /roles`, `PUT/DELETE /roles/{name}`, `GET/PUT /group-roles/{platform}[/{group}]` | `users.manage` | Roles and server group mapping |
 | `GET /plugins`, `PUT /plugins/{id}`, `POST /plugins/reload`, `GET /plugins/{id}/config`, `PUT /instances/{i}/plugins/{id}/config` | `plugins.manage` | [Plugins](plugins/README.md) |
+| `PUT /instances/{i}/plugins/{id}` `{active, permissions?}` | `plugins.manage` (all instances) | Activates or deactivates a plugin on one instance; `permissions` replaces the granted ones (they apply to the plugin on every instance). A plugin active on all instances (from older versions) gets an explicit list, so instances created later do not get it; not for `autorun` plugins |
+| `PUT /plugins/{id}/permissions` `{permissions, enable?}` | `plugins.manage` (all instances) | Replaces the granted permissions and restarts the plugin, keeping where it runs (`enable`: also enables it) |
 | `POST /instances/{i}/plugins/{id}/token` | `plugins.use` | Token for a plugin's web page |
 | `POST /instances/{i}/plugins/{id}/events/{name}`, `GET …/ws` | handler's permission / `plugins.use` | Plugin endpoints |
 | `POST /public/instances/{i}/plugins/{id}/events/{name}` | – | Public plugin endpoints |

@@ -4,7 +4,7 @@ A modern, plugin-extensible voice bot for TeamSpeak 3 and TeamSpeak 6, inspired 
 (Discord is planned). One James process runs any number of bots; you control them from a web
 interface, with chat commands in TeamSpeak, or through an HTTP API.
 
-> **Status:** version 0.5. See [PLAN.md](PLAN.md) for scope, architecture and milestones.
+> **Status:** version 0.6. See [PLAN.md](PLAN.md) for scope, architecture and milestones.
 
 ## Features
 

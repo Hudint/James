@@ -8,8 +8,8 @@
   clicking a channel).
 - **Library** – music on the server; upload files (MP3, FLAC, OGG, WAV, …).
 - **Playlists** – saved lists; play them on any instance.
-- **Plugins** – enable plugins, grant permissions, choose instances, settings
-  ([Plugins](plugins/README.md)).
+- **Plugins** – for the instance chosen at the top: activate and deactivate plugins, their
+  settings, and the permissions they get ([Plugins](plugins/README.md)).
 - **Instance → Settings** – connection, audio, command prefix, voice, and the bot's **identity**:
   its unique ID, and an existing identity to use instead (exported from the TeamSpeak client via
   *Tools → Identities → Export*, or copied from SinusBot), so the bot keeps its server groups.

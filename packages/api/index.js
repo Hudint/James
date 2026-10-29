@@ -5,3 +5,7 @@ export function definePlugin(definition) {
   }
   return definition;
 }
+
+export function defineConfig(fields) {
+  return fields;
+}

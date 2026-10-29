@@ -1,10 +1,13 @@
 // Plugin discovery: native plugins are directories with a package.json containing a
-// "james" section; SinusBot scripts are single .js files calling registerPlugin().
+// "james" section, or single .ts files exporting definePlugin({...}); SinusBot scripts are
+// single .js files calling registerPlugin(). Single files are read by running their top level
+// in a sandbox, each in its own process (probe.ts).
 
+import { spawn } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { types } from 'node:util';
-import vm from 'node:vm';
 
 export interface Manifest {
   id: string;
@@ -54,7 +57,7 @@ const SINUSBOT_BACKENDS: Record<string, string> = { ts3: 'teamspeak', discord: '
 /** What SinusBot lets every script do without declaring it: offered, granted by an admin. */
 const SINUSBOT_OPTIONAL = ['moderation', 'channels', 'playlists'];
 
-export function discover(pluginsDir: string, version: string): { plugins: Discovered[]; errors: { id: string; error: string }[] } {
+export async function discover(pluginsDir: string, version: string): Promise<{ plugins: Discovered[]; errors: { id: string; error: string }[] }> {
   const plugins: Discovered[] = [];
   const errors: { id: string; error: string }[] = [];
   let entries: fs.Dirent[];
@@ -64,19 +67,33 @@ export function discover(pluginsDir: string, version: string): { plugins: Discov
     if (error.code === 'ENOENT') return { plugins, errors };
     throw error;
   }
-  for (const entry of entries.sort((a, b) => a.name.localeCompare(b.name))) {
-    const full = path.join(pluginsDir, entry.name);
-    try {
-      if (entry.isDirectory() && fs.existsSync(path.join(full, 'package.json'))) {
-        const found = native(full, entry.name, version);
-        if (found) plugins.push(found);
-      } else if (entry.isFile() && entry.name.endsWith('.js')) {
-        plugins.push(sinusbot(pluginsDir, entry.name));
+  // Files are read by probe processes, a few at a time, within an overall time budget.
+  const deadline = Date.now() + SCAN_BUDGET_MS;
+  const found: (Discovered | null)[] = [];
+  const jobs = entries
+    .sort((a, b) => a.name.localeCompare(b.name))
+    .map((entry, index) => async () => {
+      const full = path.join(pluginsDir, entry.name);
+      try {
+        if (entry.isDirectory() && fs.existsSync(path.join(full, 'package.json'))) {
+          found[index] = native(full, entry.name, version);
+        } else if (entry.isFile() && entry.name.endsWith('.js')) {
+          found[index] = await sinusbot(pluginsDir, entry.name, deadline);
+        } else if (entry.isFile() && entry.name.endsWith('.ts') && !entry.name.endsWith('.d.ts')) {
+          found[index] = await singleFile(pluginsDir, entry.name, version, deadline);
+        }
+      } catch (error: any) {
+        errors.push({ id: entry.name.replace(/\.(js|ts)$/, ''), error: describe(error) });
       }
-    } catch (error: any) {
-      errors.push({ id: entry.name.replace(/\.js$/, ''), error: describe(error) });
-    }
-  }
+    });
+  let next = 0;
+  await Promise.all(
+    Array.from({ length: PROBES_AT_ONCE }, async () => {
+      while (next < jobs.length) await jobs[next++]!();
+    }),
+  );
+  for (const p of found) if (p) plugins.push(p);
+  errors.sort((a, b) => a.id.localeCompare(b.id));
   // Two plugins with one id (e.g. `foo/` and `Foo.js`): neither is loaded.
   const counts = new Map<string, number>();
   for (const p of plugins) counts.set(p.manifest.id, (counts.get(p.manifest.id) ?? 0) + 1);
@@ -101,45 +118,168 @@ function native(dir: string, id: string, version: string): Discovered | null {
   const pkg = JSON.parse(fs.readFileSync(path.join(dir, 'package.json'), 'utf8'));
   const james = pkg.james;
   if (!james || typeof james !== 'object') return null; // an ordinary npm package
+  checkShape(james);
   checkId(id);
-  const engine = typeof james.engine === 'string' ? james.engine : null;
-  if (engine && !satisfies(version, engine)) throw new Error(`requires James ${engine} (this is ${version})`);
   const main = typeof pkg.main === 'string' ? pkg.main : ['index.ts', 'index.js', 'index.mjs'].find((f) => fs.existsSync(path.join(dir, f)));
   if (!main) throw new Error('no entry point (set "main" in package.json)');
   const entry = path.resolve(dir, main);
   if (!entry.startsWith(dir + path.sep) || !fs.existsSync(entry)) throw new Error(`entry point '${main}' not found`);
-  if (james.config !== undefined && !Array.isArray(james.config)) throw new Error("'james.config' must be a list");
   const webDir = james.web ? path.resolve(dir, typeof james.web === 'string' ? james.web : 'web') : null;
   if (webDir && (webDir === dir || !webDir.startsWith(dir + path.sep))) throw new Error("'james.web' must be a subdirectory of the plugin");
+  const author = typeof pkg.author === 'string' ? pkg.author : pkg.author?.name;
+  const manifest = nativeManifest(id, { ...james, name: james.name ?? pkg.name, version: pkg.version, description: pkg.description, author }, version, 'james');
+  manifest.web = webDir !== null && fs.existsSync(webDir);
+  return { manifest, dir, entry, webDir: manifest.web ? webDir : null, readable: [dir] };
+}
+
+/** A plugin in one `<id>.ts` file: its manifest is the argument of definePlugin(). */
+async function singleFile(pluginsDir: string, file: string, version: string, deadline: number): Promise<Discovered> {
+  const id = checkId(file.slice(0, -3));
+  const entry = path.join(pluginsDir, file);
+  const definition = await probe('james', entry, deadline);
+  const manifest = nativeManifest(id, definition, version, '');
+  const modules = path.join(pluginsDir, 'node_modules');
+  return { manifest, dir: pluginsDir, entry, webDir: null, readable: [entry, modules].filter((p) => fs.existsSync(p)) };
+}
+
+/** Most config fields (also nested) and nesting of a manifest. */
+const MAX_FIELDS = 300;
+const MAX_DEPTH = 4;
+
+/** The manifest of a native plugin from its definition (package.json `james` or definePlugin()). */
+function nativeManifest(id: string, d: Record<string, any>, version: string, prefix: string): Manifest {
+  const at = (field: string) => (prefix ? `${prefix}.${field}` : field);
+  const engine = typeof d.engine === 'string' ? d.engine : null;
+  if (engine && !satisfies(version, engine)) throw new Error(`requires James ${engine} (this is ${version})`);
+  if (d.config !== undefined && !Array.isArray(d.config)) throw new Error(`'${at('config')}' must be a list`);
+  checkFields(d.config ?? [], 1, { count: 0 });
   return {
-    manifest: {
-      id,
-      kind: 'james',
-      name: String(james.name ?? pkg.name ?? id),
-      version: String(pkg.version ?? ''),
-      description: String(pkg.description ?? ''),
-      author: typeof pkg.author === 'string' ? pkg.author : String(pkg.author?.name ?? ''),
-      engine,
-      permissions: strings(james.permissions, 'james.permissions'),
-      optionalPermissions: strings(james.optionalPermissions, 'james.optionalPermissions'),
-      config: james.config ?? [],
-      platforms: strings(james.platforms, 'james.platforms'),
-      autorun: james.autorun === true,
-      hidden: james.hidden === true,
-      web: webDir !== null && fs.existsSync(webDir),
-    },
-    dir,
-    entry,
-    webDir: webDir && fs.existsSync(webDir) ? webDir : null,
-    readable: [dir],
+    id,
+    kind: 'james',
+    name: String(d.name ?? id).slice(0, 200),
+    version: String(d.version ?? '').slice(0, 50),
+    description: String(d.description ?? '').slice(0, 1000),
+    author: String(d.author ?? '').slice(0, 200),
+    engine,
+    permissions: strings(d.permissions, at('permissions')),
+    optionalPermissions: strings(d.optionalPermissions, at('optionalPermissions')),
+    config: d.config ?? [],
+    platforms: strings(d.platforms, at('platforms')),
+    autorun: d.autorun === true,
+    hidden: d.hidden === true,
+    web: false,
   };
 }
 
+function checkFields(fields: unknown[], depth: number, seen: { count: number }) {
+  if (depth > MAX_DEPTH) throw new Error('the settings are nested too deeply');
+  for (const field of fields) {
+    if (++seen.count > MAX_FIELDS) throw new Error(`more than ${MAX_FIELDS} settings`);
+    if (!field || typeof field !== 'object' || typeof (field as any).name !== 'string') throw new Error('every setting needs a name');
+    const vars = (field as any).vars;
+    if (Array.isArray(vars)) checkFields(vars, depth + 1, seen);
+  }
+}
+
+/** Deepest nesting and most values of a manifest (James parses it with a nesting limit). */
+const MAX_NESTING = 16;
+const MAX_VALUES = 20_000;
+
+function checkShape(value: unknown) {
+  let values = 0;
+  const walk = (v: unknown, depth: number) => {
+    if (depth > MAX_NESTING) throw new Error('the manifest is nested too deeply');
+    if (++values > MAX_VALUES) throw new Error('the manifest is too large');
+    if (v && typeof v === 'object') for (const item of Object.values(v)) walk(item, depth + 1);
+  };
+  walk(value, 0);
+}
+
+/** Largest plugin file that is read. */
+const MAX_SOURCE = 1024 * 1024;
+const PROBE = fileURLToPath(new URL('./probe.ts', import.meta.url));
+const HOST_DIR = path.dirname(path.dirname(PROBE));
+
+/** Probe processes at the same time, and the time all of them together may take. */
+const PROBES_AT_ONCE = 4;
+const SCAN_BUDGET_MS = 40_000;
+/** Time one probe may take (it is killed after it). */
+const PROBE_MS = 3000;
+/** Largest probe output (the manifest as JSON). */
+const MAX_OUTPUT = 300 * 1024;
+
+/**
+ * Runs `file`'s top level in the sandbox of probe.ts, in a process of its own: the Node
+ * permission model (reads only the host's files; the source comes on stdin), a small heap, no
+ * environment, no inherited descriptors besides stdio (the IPC channel to James is fd 3), and
+ * killed after a few seconds.
+ */
+function probe(kind: 'james' | 'sinusbot', file: string, deadline: number): Promise<Record<string, any>> {
+  if (fs.statSync(file).size > MAX_SOURCE) throw new Error('the file is too large');
+  const source = fs.readFileSync(file);
+  if (source.length > MAX_SOURCE) throw new Error('the file is too large');
+  const time = Math.min(PROBE_MS, deadline - Date.now());
+  if (time <= 0) throw new Error('not read: reading the plugins took too long');
+  return new Promise((resolve, reject) => {
+    const child = spawn(
+      process.execPath,
+      [
+        '--permission',
+        `--allow-fs-read=${HOST_DIR}`,
+        '--experimental-vm-modules',
+        '--disable-warning=ExperimentalWarning',
+        '--max-old-space-size=64',
+        PROBE,
+        kind,
+      ],
+      // fd 3 is replaced (by /dev/null) instead of inherited.
+      { env: {}, stdio: ['pipe', 'pipe', 'ignore', 'ignore'] },
+    );
+    const chunks: Buffer[] = [];
+    let size = 0;
+    let failure: string | null = null;
+    const stop = (why: string) => {
+      failure ??= why;
+      child.kill('SIGKILL');
+    };
+    const timer = setTimeout(() => stop('reading the plugin took too long'), time);
+    child.stdout!.on('data', (chunk: Buffer) => {
+      size += chunk.length;
+      if (size > MAX_OUTPUT) stop('the manifest is too large');
+      else chunks.push(chunk);
+    });
+    child.stdin!.on('error', () => {});
+    child.stdin!.end(source);
+    child.on('error', (error) => stop(error.message));
+    child.on('close', (code) => {
+      clearTimeout(timer);
+      if (failure) return reject(new Error(failure));
+      let parsed: { manifest?: unknown; error?: unknown } | null = null;
+      try {
+        parsed = code === 0 ? JSON.parse(Buffer.concat(chunks).toString('utf8')) : null;
+      } catch {
+        parsed = null;
+      }
+      if (!parsed) return reject(new Error('the plugin could not be read (it may use too much memory)'));
+      if (typeof parsed.error === 'string') return reject(new Error(parsed.error));
+      if (!parsed.manifest || typeof parsed.manifest !== 'object' || Array.isArray(parsed.manifest)) {
+        return reject(new Error('the plugin could not be read'));
+      }
+      try {
+        checkShape(parsed.manifest);
+      } catch (error) {
+        return reject(error);
+      }
+      resolve(parsed.manifest as Record<string, any>);
+    });
+  });
+}
+
 /** Reads a SinusBot script's manifest by running its top level with stubbed globals. */
-function sinusbot(scriptsDir: string, file: string): Discovered {
+async function sinusbot(scriptsDir: string, file: string, deadline: number): Promise<Discovered> {
   const id = checkId(file.slice(0, -3).toLowerCase());
   const entry = path.join(scriptsDir, file);
-  const manifest = probeSinusbot(fs.readFileSync(entry, 'utf8'), file);
+  const manifest = await probe('sinusbot', entry, deadline);
   const webDir = path.join(scriptsDir, file.slice(0, -3), 'html');
   const hasWeb = manifest.enableWeb === true || manifest.enableweb === true;
   const permissions = new Set<string>();
@@ -152,6 +292,7 @@ function sinusbot(scriptsDir: string, file: string): Discovered {
   // James extension (SinusBot ignores it): permissions a script needs, e.g. ['moderation'].
   for (const permission of strings(manifest.permissions, 'permissions')) permissions.add(permission);
   const backends = manifest.backends === undefined ? ['ts3'] : strings(manifest.backends, 'backends');
+  if (Array.isArray(manifest.vars)) checkFields(manifest.vars, 1, { count: 0 });
   return {
     manifest: {
       id,
@@ -176,37 +317,6 @@ function sinusbot(scriptsDir: string, file: string): Discovered {
     // The script, its own folder and npm packages next to the scripts.
     readable: [entry, path.join(scriptsDir, file.slice(0, -3)), path.join(scriptsDir, 'node_modules')].filter((p) => fs.existsSync(p)),
   };
-}
-
-/**
- * Reads a SinusBot script's manifest by running its top level with stubbed globals. Runs in
- * the discovery process, which can read the plugin directory and nothing else; the sandbox
- * only gets functions created inside it, and microtasks are bounded by the timeout too.
- */
-export function probeSinusbot(code: string, filename: string): Record<string, any> {
-  // A fresh global without links to this realm (a contextified host object would expose the
-  // host's Function constructor through its prototype chain).
-  const context = vm.createContext(vm.constants.DONT_CONTEXTIFY, { microtaskMode: 'afterEvaluate', codeGeneration: { strings: false, wasm: false } });
-  vm.runInContext(
-    `var __manifest = null;
-     var __stub = new Proxy(function () {}, { get: function () { return __stub; }, apply: function () { return __stub; } });
-     function registerPlugin(m) {
-       if (__manifest) throw new Error('registerPlugin() called twice');
-       if (!m || typeof m !== 'object') throw new Error('registerPlugin() needs a manifest object');
-       __manifest = JSON.stringify(m);
-     }
-     var require = function () { return __stub; };
-     var module = { exports: {} }, exports = module.exports;
-     var console = { log() {}, info() {}, warn() {}, error() {}, debug() {} };
-     var setTimeout = function () { return 0; }, setInterval = setTimeout, clearTimeout = function () {}, clearInterval = clearTimeout;`,
-    context,
-  );
-  // displayErrors would read the thrown value's properties outside the time limit.
-  vm.runInContext(code, context, { filename, timeout: 1000, displayErrors: false });
-  const manifest = vm.runInContext('__manifest', context, { timeout: 1000, displayErrors: false });
-  if (typeof manifest !== 'string') throw new Error('the script does not call registerPlugin()');
-  // A plain copy, parsed outside the sandbox.
-  return JSON.parse(manifest);
 }
 
 /**
