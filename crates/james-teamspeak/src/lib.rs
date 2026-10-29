@@ -921,11 +921,11 @@ impl Session {
         }
         let (reply, result) = tokio::sync::oneshot::channel();
         self.apply_live(con, reply);
-        tokio::spawn(async move {
+        tokio::spawn(tracing::Instrument::in_current_span(async move {
             if let Ok(Err(e)) = result.await {
                 tracing::warn!(error = %format!("{e:#}"), "cannot apply the settings after connecting");
             }
-        });
+        }));
     }
 
     /// Brings the running connection in line with `self.config`: the nickname, and the
@@ -1004,7 +1004,7 @@ impl Session {
             self.send(con, Ok(packet), tx);
             results.push(rx);
         }
-        tokio::spawn(async move {
+        tokio::spawn(tracing::Instrument::in_current_span(async move {
             let mut first_error = None;
             for rx in results {
                 if let Err(e) = rx.await.unwrap_or_else(|_| Err(anyhow!("connection closed"))) {
@@ -1016,7 +1016,7 @@ impl Session {
                 Some(e) => Err(e),
                 None => finished,
             });
-        });
+        }));
     }
 
     fn send(&mut self, con: &mut Connection, packet: anyhow::Result<OutCommand>, reply: Reply<()>) {

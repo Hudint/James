@@ -29,6 +29,8 @@
   // Phones: the instance actions go into a menu next to the title.
   const phone = mediaQuery('(max-width: 600px)');
   let playerCard = $state<HTMLElement | null>(null);
+  const manage = $derived(can('instance.manage', id));
+  const logs = $derived(can('instance.logs', id));
 
   /** From the mini player on the server tab: to the player, with keyboard focus there. */
   async function showPlayerTab() {
@@ -131,27 +133,39 @@
             <span class="badge success"><span class="dot"></span>{t('instance.connected')}</span>
           {/if}
         </span>
-        {#if phone.matches && status && can('instance.manage', id)}
+        {#if phone.matches && status && (manage || logs)}
           <ActionMenu
             label={t('common.moreActions')}
             title={summary.name}
             items={[
-              { label: t('instance.restart'), icon: 'refresh', disabled: busy, onclick: () => lifecycle('restart') },
-              { label: t('instance.settings'), icon: 'settings', href: `/instances/${id}/settings` },
-              { label: t('instance.stop'), icon: 'power', danger: true, disabled: busy, onclick: () => lifecycle('stop') },
+              ...(manage
+                ? [
+                    { label: t('instance.restart'), icon: 'refresh' as const, disabled: busy, onclick: () => lifecycle('restart') },
+                    { label: t('instance.settings'), icon: 'settings' as const, href: `/instances/${id}/settings` },
+                  ]
+                : []),
+              ...(logs ? [{ label: t('logs.title'), icon: 'logs' as const, href: `/instances/${id}/logs` }] : []),
+              ...(manage ? [{ label: t('instance.stop'), icon: 'power' as const, danger: true, disabled: busy, onclick: () => lifecycle('stop') }] : []),
             ]}
           />
         {/if}
       </div>
-      {#if can('instance.manage', id) && !(phone.matches && status)}
+      {#if (manage || logs) && !(phone.matches && status)}
         <div class="row actions">
-          {#if status}
-            <button class="btn" disabled={busy} onclick={() => lifecycle('restart')}><Icon name="refresh" size={16} />{t('instance.restart')}</button>
-            <button class="btn" disabled={busy} onclick={() => lifecycle('stop')}><Icon name="power" size={16} />{t('instance.stop')}</button>
-          {:else}
-            <button class="btn btn-primary" disabled={busy} onclick={() => lifecycle('start')}><Icon name="power" size={16} />{t('instance.start')}</button>
+          {#if manage}
+            {#if status}
+              <button class="btn" disabled={busy} onclick={() => lifecycle('restart')}><Icon name="refresh" size={16} />{t('instance.restart')}</button>
+              <button class="btn" disabled={busy} onclick={() => lifecycle('stop')}><Icon name="power" size={16} />{t('instance.stop')}</button>
+            {:else}
+              <button class="btn btn-primary" disabled={busy} onclick={() => lifecycle('start')}><Icon name="power" size={16} />{t('instance.start')}</button>
+            {/if}
           {/if}
-          <a class="btn" href="/instances/{id}/settings"><Icon name="settings" size={16} />{t('instance.settings')}</a>
+          {#if logs}
+            <a class="btn" href="/instances/{id}/logs"><Icon name="logs" size={16} />{t('logs.title')}</a>
+          {/if}
+          {#if manage}
+            <a class="btn" href="/instances/{id}/settings"><Icon name="settings" size={16} />{t('instance.settings')}</a>
+          {/if}
         </div>
       {/if}
     </header>

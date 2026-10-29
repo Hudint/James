@@ -6,6 +6,11 @@
 - **Instance** – player (play/pause, skip, seek, volume, repeat, shuffle), queue (reorder, remove,
   jump), adding music (URL, search, library), speaking a text, and the server tree (move the bot by
   clicking a channel).
+- **Logs** (button on an instance) – the instance's recent messages: connection events, playback
+  errors, chat commands (without their arguments) and what plugins log there (`bot.log` / SinusBot's
+  `engine.log`; debug messages only at log level debug), filterable by level, source and text, and
+  downloadable. The last 2000 messages per instance since James started are kept in memory; floods
+  from one client or plugin are cut short.
 - **Library** – music on the server; upload files (MP3, FLAC, OGG, WAV, …) and edit a track's title,
   artist and album (pencil button). The file is not changed and a rescan keeps the edits; fields
   left as in the file follow the file's tags. Tracks already in a queue or playlist keep the name they
@@ -77,6 +82,7 @@ Linked identities → Link identity** and send the shown `!link` code to the bot
 | `server.message` | Send chat messages as the bot |
 | `server.chat.read` | Read private chat and commands in the web interface |
 | `instance.view`, `instance.manage` | See / create, configure and delete instances |
+| `instance.logs` | Read an instance's log (may contain chat commands and client names; also granted by `instance.*`) |
 | `library.read`, `library.manage` | Browse / upload, rename and rescan the library |
 | `playlist.read`, `playlist.manage` | See / edit playlists |
 | `plugins.use`, `plugins.manage` | Use plugin pages / install and configure plugins |

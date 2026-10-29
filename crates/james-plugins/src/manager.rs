@@ -174,6 +174,10 @@ pub struct PluginManager {
     /// Serialises store writes (quota check and write).
     pub(crate) store_lock: tokio::sync::Mutex<()>,
     notices: Mutex<HashMap<String, VecDeque<Instant>>>,
+    /// Messages per plugin and instance that reach the instance's log.
+    log_limit: james_core::logs::RateLimiter,
+    /// "Overloaded" warnings per plugin and instance (one per minute).
+    overload_log: james_core::logs::RateLimiter,
     next_ws: AtomicU64,
     this: Weak<PluginManager>,
 }
@@ -194,6 +198,8 @@ impl PluginManager {
             ws: Mutex::default(),
             store_lock: tokio::sync::Mutex::new(()),
             notices: Mutex::default(),
+            log_limit: james_core::logs::RateLimiter::new(120, Duration::from_secs(60)),
+            overload_log: james_core::logs::RateLimiter::new(1, Duration::from_secs(60)),
             next_ws: AtomicU64::new(1),
             this: this.clone(),
         })
@@ -708,6 +714,9 @@ impl PluginManager {
                 CONTEXT_TIMEOUT,
             )
             .await;
+        if result.is_ok() {
+            tracing::info!(%plugin, %instance, "plugin started");
+        }
         if let Err(e) = result {
             tracing::warn!(%plugin, %instance, error = %e, "failed to start plugin context");
             self.inner.write().contexts.remove(&key);
@@ -724,6 +733,8 @@ impl PluginManager {
             .await
         {
             tracing::warn!(%plugin, %instance, error = %e, "failed to stop plugin context");
+        } else {
+            tracing::info!(%plugin, %instance, "plugin stopped");
         }
         self.inner
             .write()
@@ -1165,8 +1176,12 @@ impl PluginManager {
                         stripped
                     })
                 };
-                if !peer.notify("instance.event", data.clone()) {
-                    tracing::warn!(%plugin, instance = %envelope.instance, "plugin overloaded, event dropped");
+                if !peer.notify("instance.event", data.clone())
+                    && self
+                        .overload_log
+                        .allow(&format!("{plugin}/{}", envelope.instance))
+                {
+                    tracing::warn!(%plugin, instance = %envelope.instance, "plugin overloaded, events dropped");
                 }
             }
         }
@@ -1521,7 +1536,7 @@ pub(crate) fn sanitize(text: &str) -> String {
 
 /// Text of a `log` event.
 pub(crate) fn log_text(data: &Value) -> String {
-    sanitize(data["message"].as_str().unwrap_or_default())
+    james_core::logs::clean(data["message"].as_str().unwrap_or_default())
 }
 
 /// Requests and events from one plugin's process; the plugin id is bound to the connection.
@@ -1556,11 +1571,34 @@ impl Handler for HostHandler {
             "log" => {
                 let message = log_text(&data);
                 let instance = sanitize(data["instance"].as_str().unwrap_or_default());
-                match data["level"].as_str().unwrap_or("info") {
-                    "error" => tracing::error!(target: "plugin", %plugin, %instance, "{message}"),
-                    "warn" => tracing::warn!(target: "plugin", %plugin, %instance, "{message}"),
-                    "debug" => tracing::debug!(target: "plugin", %plugin, %instance, "{message}"),
-                    _ => tracing::info!(target: "plugin", %plugin, %instance, "{message}"),
+                let level = data["level"].as_str().unwrap_or("info");
+                // Messages reach an instance's log only from plugins running on it, and a chatty
+                // plugin cannot push everything else out of it (debug output does not count: it
+                // is only kept when James' own level shows it).
+                let instance_log = !instance.is_empty() && self.manager.has_context(plugin, &instance);
+                if instance_log
+                    && level != "debug"
+                    && !self.manager.log_limit.allow(&format!("{plugin}/{instance}"))
+                {
+                    // Dropped (also from James' own output), with one note a minute.
+                    if self
+                        .manager
+                        .overload_log
+                        .allow(&format!("log/{plugin}/{instance}"))
+                    {
+                        tracing::warn!(%plugin, %instance, "plugin logs too much, messages dropped");
+                    }
+                    return;
+                }
+                match level {
+                    "error" => {
+                        tracing::error!(target: "plugin", %plugin, %instance, instance_log, "{message}")
+                    }
+                    "warn" => tracing::warn!(target: "plugin", %plugin, %instance, instance_log, "{message}"),
+                    "debug" => {
+                        tracing::debug!(target: "plugin", %plugin, %instance, instance_log, "{message}")
+                    }
+                    _ => tracing::info!(target: "plugin", %plugin, %instance, instance_log, "{message}"),
                 }
             }
             "plugin.failed" => {

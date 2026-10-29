@@ -44,6 +44,8 @@ pub struct AppState {
     pub logins: LoginThrottle,
     pub actions: ActionLimiter,
     pub library: Arc<dyn LibraryService>,
+    /// Recent log messages per instance.
+    pub logs: Arc<james_core::logs::InstanceLogs>,
     /// Set the `Secure` flag on session cookies (when served via HTTPS).
     pub secure_cookies: bool,
     /// One-time token required for the first-run setup (printed to the log); `None` once

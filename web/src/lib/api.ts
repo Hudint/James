@@ -6,6 +6,7 @@ import type {
   InstanceStatus,
   InstanceSummary,
   LibraryTrack,
+  LogEntry,
   TrackNames,
   Me,
   PlayMode,
@@ -184,6 +185,8 @@ export const api = {
       "GET",
       `/instances/${enc(id)}/search?q=${enc(q)}&limit=${limit}`,
     ),
+  logs: (id: string, after = 0, limit = 500) =>
+    request<{ boot: number; entries: LogEntry[] }>("GET", `/instances/${enc(id)}/logs?after=${after}&limit=${limit}`),
   moveBot: (id: string, channel: string) =>
     request<void>("POST", `/instances/${enc(id)}/move`, { channel }),
   server: (id: string) =>

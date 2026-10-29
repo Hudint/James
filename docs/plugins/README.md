@@ -470,7 +470,9 @@ of them and `start`, `stop` and `restart` work.
 ## Logging and errors
 
 `bot.log.info(…)`, `warn`, `error` and `debug` (as well as `console.*`) write to the James log,
-tagged with the plugin and instance. `bot.notify(message)` shows a message to the users of the web
+tagged with the plugin and instance, and to the instance's log in the web interface (Logs button on
+the instance page; debug messages only when James' log level includes debug). Do not log secrets:
+whoever may read an instance's log sees them. `bot.notify(message)` shows a message to the users of the web
 interface.
 
 ## Development tips

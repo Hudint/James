@@ -19,6 +19,7 @@
     'server.chat.read',
     'instance.view',
     'instance.manage',
+    'instance.logs',
     'library.read',
     'library.manage',
     'playlist.read',

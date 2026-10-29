@@ -162,7 +162,8 @@ impl AudioEngine {
             duck: GainRamp::new(1.0),
             duck_db: 0.0,
         };
-        runtime.spawn(task.run(rx));
+        // In the caller's span: messages belong to the instance's log.
+        runtime.spawn(tracing::Instrument::in_current_span(task.run(rx)));
         Ok(Self { commands, status })
     }
 

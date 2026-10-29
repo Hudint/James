@@ -276,3 +276,15 @@ export type InstanceEvent =
   | { instance: string; type: 'speechEnded'; id: number; error: string | null; stopped: boolean };
 
 export type ServerEvent = InstanceEvent | { type: 'lagged'; skipped: number };
+
+export type LogLevel = 'debug' | 'info' | 'warn' | 'error';
+
+export interface LogEntry {
+  seq: number;
+  /** Unix milliseconds. */
+  time: number;
+  level: LogLevel;
+  /** The plugin that wrote it; `null` for James itself. */
+  plugin: string | null;
+  message: string;
+}

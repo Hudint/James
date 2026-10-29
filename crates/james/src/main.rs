@@ -29,13 +29,13 @@ struct Args {
 fn main() -> anyhow::Result<()> {
     let args = Args::parse();
     let config = Config::load(&args.config)?;
-    logging::init(&config.log);
+    let logs = logging::init(&config.log);
     // Created before the main runtime so it is independent of it.
     let audio = james_runtime::audio_runtime(config.tools.audio_threads)?;
     tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()?
-        .block_on(run(args, config, audio))
+        .block_on(run(args, config, audio, logs))
 }
 
 /// Creates a directory readable only by the current user (it holds keys and the database).
@@ -57,7 +57,12 @@ fn private_dir(path: &Path) -> anyhow::Result<()> {
     Ok(())
 }
 
-async fn run(args: Args, config: Config, audio: tokio::runtime::Handle) -> anyhow::Result<()> {
+async fn run(
+    args: Args,
+    config: Config,
+    audio: tokio::runtime::Handle,
+    logs: Arc<james_core::logs::InstanceLogs>,
+) -> anyhow::Result<()> {
     tracing::info!(version = env!("CARGO_PKG_VERSION"), config = %args.config.display(), "starting James");
 
     private_dir(&config.data_dir)?;
@@ -179,6 +184,7 @@ async fn run(args: Args, config: Config, audio: tokio::runtime::Handle) -> anyho
         allowed_hosts: Arc::new(config.http.allowed_hosts.clone()),
         ws_revalidate: std::time::Duration::from_secs(30),
         library: scanner,
+        logs,
         secure_cookies: config.http.secure_cookies,
         plugins,
         plugin_tokens: Default::default(),

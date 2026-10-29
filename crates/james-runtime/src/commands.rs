@@ -73,6 +73,9 @@ struct Inner {
 pub struct CommandRegistry {
     inner: Arc<RwLock<Inner>>,
     permissions: Arc<RwLock<Arc<dyn PermissionChecker>>>,
+    /// Commands logged per instance and client, and per instance.
+    log_limit: Arc<james_core::logs::RateLimiter>,
+    log_total: Arc<james_core::logs::RateLimiter>,
 }
 
 impl Default for CommandRegistry {
@@ -80,6 +83,14 @@ impl Default for CommandRegistry {
         Self {
             inner: Default::default(),
             permissions: Arc::new(RwLock::new(Arc::new(AllowAll))),
+            log_limit: Arc::new(james_core::logs::RateLimiter::new(
+                20,
+                std::time::Duration::from_secs(60),
+            )),
+            log_total: Arc::new(james_core::logs::RateLimiter::new(
+                200,
+                std::time::Duration::from_secs(60),
+            )),
         }
     }
 }
@@ -149,6 +160,11 @@ impl CommandRegistry {
         list
     }
 
+    /// Whether a command of this client is logged (per client and per instance limits).
+    fn log_allowed(&self, instance: &str, client: &str) -> bool {
+        self.log_limit.allow(&format!("{instance}/{client}")) && self.log_total.allow(instance)
+    }
+
     /// Parses `text` and runs the command if it starts with `prefix`.
     /// Returns `None` if the text is not a command.
     pub async fn dispatch(
@@ -173,8 +189,17 @@ impl CommandRegistry {
         if let Some(permission) = command.permission() {
             let checker = self.permissions.read().clone();
             if !checker.allowed(&instance, &invoker, permission).await {
+                if self.log_allowed(instance.id(), &invoker.uid) {
+                    tracing::info!(client = ?invoker.name, "{prefix}{name} refused: no permission");
+                }
                 return Some("You are not allowed to use this command.".into());
             }
+        }
+        // Without the arguments (they may hold link codes and the like); a client sending many
+        // commands cannot push everything else out of the instance's log.
+        let logged = self.log_allowed(instance.id(), &invoker.uid);
+        if logged {
+            tracing::info!(client = ?invoker.name, "{prefix}{name}");
         }
         let ctx = CommandContext {
             instance,
@@ -186,7 +211,11 @@ impl CommandRegistry {
             Ok(reply) => reply,
             Err(e) => {
                 let detail = format!("{e:#}");
-                tracing::debug!(command = %name, error = %detail, "command failed");
+                // The error may repeat the arguments: the details only in James' own debug output.
+                tracing::debug!(error = ?detail, "{prefix}{name} failed");
+                if logged {
+                    tracing::info!("{prefix}{name} failed");
+                }
                 Some(format!(
                     "Error: {}",
                     james_core::text::escape_markup(&james_core::text::user_message(&detail))

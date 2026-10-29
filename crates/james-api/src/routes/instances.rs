@@ -2,7 +2,7 @@
 
 use std::time::Duration;
 
-use axum::extract::{Path, State};
+use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::routing::{delete, get, post, put};
 use axum::{Json, Router};
@@ -28,6 +28,7 @@ pub fn routes() -> Router<AppState> {
         .route("/instances/{id}/identity", get(identity).put(import_identity))
         .route("/instances/{id}/identity/export", post(export_identity))
         .route("/instances/{id}/status", get(status))
+        .route("/instances/{id}/logs", get(logs))
         .route("/instances/{id}/play", post(play))
         .route("/instances/{id}/skip", post(skip))
         .route("/instances/{id}/previous", post(previous))
@@ -146,10 +147,13 @@ async fn create(
     auth.require("instance.manage", None)?;
     validate_id(&config.id)?;
     let db = state.db.clone();
+    let logs = state.logs.clone();
     state
         .manager
         .configure(config.clone(), ConfigureMode::Create, |c| async move {
-            Ok(db.save_instance(&c.id, &c).await?)
+            db.save_instance(&c.id, &c).await?;
+            logs.revive(&c.id);
+            Ok(())
         })
         .await
         .map_err(configure_error)?;
@@ -179,13 +183,17 @@ async fn update(
 async fn remove(State(state): State<AppState>, auth: Auth, Path(id): Path<String>) -> ApiResult<StatusCode> {
     auth.require("instance.manage", Some(&id))?;
     let db = state.db.clone();
+    let logs = state.logs.clone();
     let instance = id.clone();
     state
         .manager
         .delete(&id, || async move {
             db.delete_instance(&instance).await?;
             // Plugin settings and stores of the instance go with it.
-            Ok(db.delete_plugin_instance_data(&instance).await?)
+            db.delete_plugin_instance_data(&instance).await?;
+            // Under the instance's lifecycle lock, like `revive` on create.
+            logs.forget(&instance);
+            Ok(())
         })
         .await
         .map_err(configure_error)?;
@@ -339,7 +347,7 @@ async fn export_identity(
         .and_then(Value::as_str)
         .unwrap_or("?");
     // Debug-formatted: names may contain line breaks (forged log lines).
-    tracing::warn!(instance = ?id, user = ?auth.user.username, user_id = auth.user.id, uid = %uid, "identity exported");
+    tracing::warn!(instance = %id, user = ?auth.user.username, user_id = auth.user.id, uid = %uid, "identity exported");
     Ok((
         [(axum::http::header::CACHE_CONTROL, "no-store")],
         Json(json!({ "identity": exported })),
@@ -358,6 +366,52 @@ pub(super) fn running(
         .manager
         .get(id)
         .ok_or_else(|| ApiError::conflict(format!("instance '{id}' is not running")))
+}
+
+#[derive(Deserialize)]
+struct LogQuery {
+    /// Only messages after this sequence number (from an earlier answer).
+    #[serde(default)]
+    after: u64,
+    #[serde(default = "default_log_limit")]
+    limit: usize,
+}
+
+fn default_log_limit() -> usize {
+    500
+}
+
+#[derive(Serialize)]
+struct LogPage {
+    /// Changes when James restarts (sequence numbers start over): ask again from 0.
+    boot: u64,
+    entries: Vec<james_core::logs::LogEntry>,
+}
+
+/// Recent log messages of the instance (James' and its plugins'), oldest first.
+async fn logs(
+    State(state): State<AppState>,
+    auth: Auth,
+    Path(id): Path<String>,
+    Query(query): Query<LogQuery>,
+) -> ApiResult<impl axum::response::IntoResponse> {
+    auth.require("instance.logs", Some(&id))?;
+    if state.manager.config(&id).is_none() {
+        return Err(ApiError::not_found("instance"));
+    }
+    // Logs may hold client names and chat commands: not kept in caches.
+    let headers = [(axum::http::header::CACHE_CONTROL, "no-store")];
+    Ok((
+        headers,
+        Json(LogPage {
+            boot: state.logs.boot(),
+            entries: state.logs.since(
+                &id,
+                query.after,
+                query.limit.clamp(1, james_core::logs::MAX_ENTRIES),
+            ),
+        }),
+    ))
 }
 
 async fn status(

@@ -22,6 +22,7 @@ use james_core::source::{MediaInput, Track};
 use serde::{Deserialize, Serialize};
 use tokio::sync::{mpsc, oneshot, watch};
 use tokio::task::JoinHandle;
+use tracing::Instrument;
 
 use crate::engine::PlaybackEngine;
 use crate::manager::Services;
@@ -601,21 +602,25 @@ pub(crate) fn spawn(
         .bitrate
         .unwrap_or(DEFAULT_BITRATE)
         .min(capabilities.max_bitrate);
-    let engine = services.engines.spawn(
-        EngineConfig {
-            ffmpeg: services.ffmpeg.clone(),
-            target_lufs: config.audio.target_lufs,
-            bitrate,
-            max_frame_bytes: capabilities
-                .max_frame_bytes
-                .unwrap_or(james_audio::encoder::MAX_PACKET),
-            volume: config.audio.volume,
-            http_proxy: services.http_proxy.clone(),
-            ..EngineConfig::default()
-        },
-        audio_tx,
-        engine_events_tx,
-    )?;
+    // Everything logged by the instance's tasks belongs to its log (see the web interface).
+    let span = tracing::info_span!("instance", instance = %config.id);
+    let engine = span.in_scope(|| {
+        services.engines.spawn(
+            EngineConfig {
+                ffmpeg: services.ffmpeg.clone(),
+                target_lufs: config.audio.target_lufs,
+                bitrate,
+                max_frame_bytes: capabilities
+                    .max_frame_bytes
+                    .unwrap_or(james_audio::encoder::MAX_PACKET),
+                volume: config.audio.volume,
+                http_proxy: services.http_proxy.clone(),
+                ..EngineConfig::default()
+            },
+            audio_tx,
+            engine_events_tx,
+        )
+    })?;
 
     let handle = InstanceHandle {
         credential_saves: Arc::default(),
@@ -628,25 +633,22 @@ pub(crate) fn spawn(
     };
 
     let (settings_tx, settings_rx) = watch::channel(config.settings.clone());
-    let adapter_task = tokio::spawn(run_adapter(
-        config.id.clone(),
-        settings_rx,
-        factory,
-        services.clone(),
-        {
+    let adapter_task = tokio::spawn(
+        run_adapter(config.id.clone(), settings_rx, factory, services.clone(), {
             PlatformContext {
                 events: platform_events_tx,
                 commands: platform_rx,
                 audio: audio_rx,
             }
-        },
-    ));
+        })
+        .instrument(span.clone()),
+    );
 
     let (description_tx, description_rx) = watch::channel(String::new());
     // Also when disabled: it can be switched on (and off, clearing it) while running.
-    tokio::spawn(description_updater(handle.clone(), description_rx));
+    tokio::spawn(description_updater(handle.clone(), description_rx).instrument(span.clone()));
     // Settings changed while connected (see `reconfigure`) reach the platform in order.
-    tokio::spawn(settings_updater(handle.clone(), settings_tx.subscribe()));
+    tokio::spawn(settings_updater(handle.clone(), settings_tx.subscribe()).instrument(span.clone()));
 
     let task = InstanceTask {
         volume: config.audio.volume,
@@ -672,9 +674,22 @@ pub(crate) fn spawn(
         speech: HashMap::new(),
         synthesizing: HashMap::new(),
         next_speech: 0,
+        failure_log: james_core::logs::RateLimiter::new(10, Duration::from_secs(60)),
     };
-    let join = tokio::spawn(task.run(control_rx, internal_rx, platform_events_rx, engine_events_rx));
+    let join = tokio::spawn(
+        task.run(control_rx, internal_rx, platform_events_rx, engine_events_rx)
+            .instrument(span),
+    );
     Ok((handle, join))
+}
+
+/// Spawns a task that logs into the current instance's log (see `spawn`).
+fn spawn_here<F>(future: F) -> JoinHandle<F::Output>
+where
+    F: std::future::Future + Send + 'static,
+    F::Output: Send + 'static,
+{
+    tokio::spawn(future.in_current_span())
 }
 
 /// Runs the platform adapter, reconnecting with exponential backoff until the instance stops.
@@ -703,7 +718,7 @@ async fn run_adapter(
                 if started.elapsed() > Duration::from_secs(60) {
                     backoff = Duration::from_secs(1);
                 }
-                tracing::warn!(%instance, error = %format!("{e:#}"), retry_in = ?backoff, "platform connection failed");
+                tracing::warn!(error = %format!("{e:#}"), retry_in = ?backoff, "platform connection failed");
                 let _ = ctx.events.send(PlatformEvent::Disconnected {
                     reason: format!("{e:#}"),
                 });
@@ -724,7 +739,7 @@ async fn settings_updater(handle: InstanceHandle, mut rx: watch::Receiver<serde_
             .await
         {
             let message = format!("{e:#}");
-            tracing::warn!(instance = %handle.id(), error = %message, "cannot apply the settings");
+            tracing::warn!(error = %message, "cannot apply the settings");
             handle.notice("settings", &james_core::text::user_message(&message));
         }
     }
@@ -738,7 +753,7 @@ async fn description_updater(handle: InstanceHandle, mut rx: watch::Receiver<Str
             .platform(|reply| PlatformCommand::SetDescription { text, reply })
             .await
         {
-            tracing::debug!(instance = %handle.id(), error = %e, "failed to update description");
+            tracing::debug!(error = %e, "failed to update description");
         }
     }
 }
@@ -790,6 +805,8 @@ struct InstanceTask {
     /// Syntheses in progress (cancelled when dropped, e.g. on stop or shutdown).
     synthesizing: HashMap<u64, AbortOnDrop>,
     next_speech: u64,
+    /// Failures logged per kind and minute.
+    failure_log: james_core::logs::RateLimiter,
 }
 
 impl InstanceTask {
@@ -812,7 +829,7 @@ impl InstanceTask {
         mut platform: mpsc::UnboundedReceiver<PlatformEvent>,
         mut engine: mpsc::UnboundedReceiver<EngineEvent>,
     ) {
-        tracing::info!(instance = %self.config.id, "instance started");
+        tracing::info!("instance started");
         self.emit(InstanceEvent::Started);
         loop {
             tokio::select! {
@@ -837,7 +854,7 @@ impl InstanceTask {
             self.adapter_task.abort();
         }
         self.emit(InstanceEvent::Stopped);
-        tracing::info!(instance = %self.config.id, "instance stopped");
+        tracing::info!("instance stopped");
     }
 
     fn status(&self) -> InstanceStatus {
@@ -1053,7 +1070,7 @@ impl InstanceTask {
                 self.description.send_replace(String::new());
             }
         }
-        tracing::info!(instance = %self.config.id, "configuration applied without reconnecting");
+        tracing::info!("configuration applied without reconnecting");
         // Other clients refetch (name, audio settings).
         self.emit(InstanceEvent::PlaybackChanged {
             status: Box::new(self.status()),
@@ -1108,7 +1125,7 @@ impl InstanceTask {
         let internal = self.internal.clone();
         // A newer playback supersedes this one: cancel its open (kills yt-dlp via kill_on_drop).
         self.cancel_open();
-        let task = tokio::spawn(async move {
+        let task = spawn_here(async move {
             let result = async {
                 let input = registry.open(&item.track).await?;
                 let key = registry.cache_key(&item.track).await;
@@ -1164,7 +1181,7 @@ impl InstanceTask {
         let id = self.next_speech;
         self.speech.insert(id, (text.clone(), None));
         let internal = self.internal.clone();
-        let task = tokio::spawn(async move {
+        let task = spawn_here(async move {
             let result = match tokio::time::timeout(SYNTHESIS_TIMEOUT, tts.speak(&text, &voice)).await {
                 Ok(result) => result,
                 Err(_) => Err(anyhow!("text to speech took too long")),
@@ -1210,7 +1227,9 @@ impl InstanceTask {
                     }
                     Err(e) => {
                         let error = format!("{e:#}");
-                        tracing::warn!(instance = %self.config.id, %error, "text to speech failed");
+                        if self.failure_log.allow("tts") {
+                            tracing::warn!(%error, "text to speech failed");
+                        }
                         self.speech.remove(&id);
                         self.emit(InstanceEvent::SpeechEnded {
                             id,
@@ -1241,14 +1260,17 @@ impl InstanceTask {
     }
 
     fn track_failed(&mut self, item: QueueItem, error: String) {
-        tracing::warn!(instance = %self.config.id, track = %item.track.title, %error, "track failed");
+        // Users can make tracks fail at will: limited, so the log keeps other messages.
+        if self.failure_log.allow("track") {
+            tracing::warn!(track = ?item.track.title, %error, "track failed");
+        }
         self.emit(InstanceEvent::TrackEnded {
             item,
             error: Some(james_core::text::user_message(&error)),
         });
         self.failures += 1;
         if self.failures >= MAX_CONSECUTIVE_FAILURES {
-            tracing::warn!(instance = %self.config.id, "too many consecutive failures, stopping playback");
+            tracing::warn!("too many consecutive failures, stopping playback");
             self.failures = 0;
             self.player.stop();
             self.go_idle();
@@ -1270,7 +1292,9 @@ impl InstanceTask {
                 // Dropping the entry removes the audio file.
                 if self.speech.remove(&id).is_some() {
                     if let Some(error) = &error {
-                        tracing::warn!(instance = %self.config.id, %error, "speech failed");
+                        if self.failure_log.allow("speech") {
+                            tracing::warn!(%error, "speech failed");
+                        }
                     }
                     self.emit(InstanceEvent::SpeechEnded { id, error, stopped });
                 }
@@ -1281,6 +1305,7 @@ impl InstanceTask {
                     playing.audible = true;
                 }
                 self.failures = 0;
+                tracing::info!(source = %item.track.source, title = ?item.track.title, "playing");
                 self.emit(InstanceEvent::TrackStarted { item });
                 self.update_description();
                 self.playback_changed();
@@ -1394,7 +1419,7 @@ impl InstanceTask {
             times.pop_front();
         }
         if times.len() >= COMMAND_RATE {
-            tracing::debug!(instance = %self.config.id, client = %key, "command rate limit hit");
+            tracing::debug!(client = %key, "command rate limit hit");
             return;
         }
         times.push_back(now);
@@ -1412,11 +1437,9 @@ impl InstanceTask {
         // No live worker for this client: start one.
         let (tx, rx) = mpsc::channel(COMMAND_QUEUE);
         let _ = tx.try_send(job);
-        tokio::spawn(command_worker(
-            self.handle.clone(),
-            self.config.command_prefix.clone(),
-            rx,
-        ));
+        tokio::spawn(
+            command_worker(self.handle.clone(), self.config.command_prefix.clone(), rx).in_current_span(),
+        );
         self.command_workers.retain(|_, w| !w.is_closed());
         self.command_workers.insert(key, tx);
     }

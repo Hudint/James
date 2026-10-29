@@ -5,6 +5,7 @@
 //! providers can be added without touching the instance runtime.
 
 pub mod audio;
+pub mod logs;
 pub mod media;
 pub mod platform;
 pub mod process;

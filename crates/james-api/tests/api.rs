@@ -76,6 +76,7 @@ struct Api {
     db: Db,
     manager: Arc<InstanceManager>,
     library: Arc<FakeLibrary>,
+    logs: Arc<james_core::logs::InstanceLogs>,
     _dir: tempfile::TempDir,
 }
 
@@ -108,6 +109,7 @@ impl Api {
         });
         let manager = Arc::new(InstanceManager::new(services));
         let setup_token = Arc::new(Mutex::new(Some("SETUPTOKEN".into())));
+        let logs = Arc::new(james_core::logs::InstanceLogs::default());
         let state = AppState {
             setup_token: setup_token.clone(),
             db: db.clone(),
@@ -118,6 +120,7 @@ impl Api {
             trusted_proxies: Default::default(),
             allowed_hosts: Default::default(),
             library: library.clone(),
+            logs: logs.clone(),
             secure_cookies: false,
             ws_revalidate: Duration::from_millis(200),
             plugins: None,
@@ -134,6 +137,7 @@ impl Api {
             db,
             manager,
             library,
+            logs,
             _dir: dir,
         }
     }
@@ -857,6 +861,7 @@ async fn unknown_hosts_are_refused_when_configured() {
         logins: Default::default(),
         actions: Default::default(),
         library: api.library.clone(),
+        logs: api.logs.clone(),
         secure_cookies: false,
         trusted_proxies: Default::default(),
         allowed_hosts: Arc::new(vec!["bot.example".into()]),
@@ -1421,4 +1426,75 @@ async fn plugin_activation_and_permissions_need_plugins_manage_on_all_instances(
         let r = api.call(method, path, Some(&admin), Some(body)).await;
         assert_eq!(r.status, StatusCode::SERVICE_UNAVAILABLE, "{path}: {}", r.body);
     }
+}
+
+#[tokio::test]
+async fn instance_logs_need_their_permission() {
+    use james_core::logs::LogLevel;
+    let api = Api::new().await;
+    api.manager
+        .upsert(james_runtime::InstanceConfig {
+            id: "bot".into(),
+            platform: "fake".into(),
+            ..Default::default()
+        })
+        .unwrap();
+    api.logs.push("bot", LogLevel::Warn, None, "connection failed");
+    api.logs.push("bot", LogLevel::Info, Some("greeter"), "hello");
+    api.logs.push("other", LogLevel::Info, None, "elsewhere");
+    let (_, viewer) = api
+        .user_with_grants(
+            "viewer",
+            &[Grant::global("instance.view"), Grant::global("instance.manage")],
+        )
+        .await;
+    let (_, reader) = api
+        .user_with_grants(
+            "reader",
+            &[Grant {
+                permission: "instance.logs".into(),
+                instance: Some("bot".into()),
+            }],
+        )
+        .await;
+    assert_eq!(
+        api.call(Method::GET, "/instances/bot/logs", Some(&viewer), None)
+            .await
+            .status,
+        StatusCode::FORBIDDEN
+    );
+    let r = api
+        .call(Method::GET, "/instances/bot/logs", Some(&reader), None)
+        .await;
+    assert_eq!(r.status, StatusCode::OK);
+    assert!(r.body["boot"].as_u64().is_some());
+    let entries = r.body["entries"].as_array().unwrap();
+    assert_eq!(entries.len(), 2);
+    assert_eq!(entries[0]["level"], "warn");
+    assert_eq!(entries[1]["plugin"], "greeter");
+    let after = entries[0]["seq"].as_u64().unwrap();
+    let r = api
+        .call(
+            Method::GET,
+            &format!("/instances/bot/logs?after={after}"),
+            Some(&reader),
+            None,
+        )
+        .await;
+    assert_eq!(r.body["entries"].as_array().unwrap().len(), 1);
+    assert_eq!(
+        api.call(Method::GET, "/instances/other/logs", Some(&reader), None)
+            .await
+            .status,
+        StatusCode::FORBIDDEN,
+        "scoped to one instance"
+    );
+    let (_, admin) = api.user_with_grants("root2", &[Grant::global("*")]).await;
+    assert_eq!(
+        api.call(Method::GET, "/instances/other/logs", Some(&admin), None)
+            .await
+            .status,
+        StatusCode::NOT_FOUND,
+        "only existing instances"
+    );
 }
