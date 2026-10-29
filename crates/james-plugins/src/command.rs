@@ -83,19 +83,19 @@ impl Command for PluginCommand {
             .manager
             .upgrade()
             .ok_or_else(|| anyhow::anyhow!("plugins are not available"))?;
+        let mut params = json!({
+            "instance": ctx.instance.id(),
+            "name": self.name,
+            "args": ctx.args,
+            "mode": ctx.mode,
+            "invoker": ctx.invoker,
+        });
+        // Client IP addresses only reach plugins that may moderate.
+        if !manager.granted(&self.plugin, "moderation") {
+            james_core::platform::strip_client_addresses(&mut params);
+        }
         let result = manager
-            .request(
-                &self.plugin,
-                "command.run",
-                json!({
-                    "instance": ctx.instance.id(),
-                    "name": self.name,
-                    "args": ctx.args,
-                    "mode": ctx.mode,
-                    "invoker": ctx.invoker,
-                }),
-                COMMAND_TIMEOUT,
-            )
+            .request(&self.plugin, "command.run", params, COMMAND_TIMEOUT)
             .await?;
         Ok(match result {
             Value::String(text) if !text.is_empty() => Some(text),

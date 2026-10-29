@@ -472,6 +472,11 @@ fieldset {
   margin: 0;
 }
 
+legend {
+  padding: 0;
+  margin-bottom: var(--space-2);
+}
+
 input[type='range'] {
   width: 100%;
   accent-color: var(--accent);

@@ -157,7 +157,15 @@ async fn instance(ctx: &Ctx<'_>, method: &str, params: Value) -> Result<Value> {
     match method {
         "instance.status" => ok(ctx.instance()?.status().await.map_err(err)?),
         "instance.queue" => ok(ctx.instance()?.queue().await.map_err(err)?),
-        "instance.snapshot" => ok(ctx.instance()?.snapshot().await.map_err(err)?),
+        "instance.snapshot" => {
+            let snapshot = ctx.instance()?.snapshot().await.map_err(err)?;
+            // Client IP addresses only reach plugins that may moderate.
+            ok(if ctx.manager.granted(&ctx.plugin, "moderation") {
+                snapshot
+            } else {
+                snapshot.without_addresses()
+            })
+        }
         "instance.info" => {
             let handle = ctx.instance()?;
             let config = ctx

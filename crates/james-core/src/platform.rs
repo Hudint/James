@@ -86,8 +86,24 @@ pub struct ConnectionInfo {
     pub bytes_received: Option<u64>,
     pub connected_ms: Option<u64>,
     pub idle_ms: Option<u64>,
-    /// Remote IP address (only with sufficient permissions).
+    /// Remote IP address (only with sufficient permissions). Personal data: removed with
+    /// [`strip_client_addresses`] before it reaches anyone who does not need it.
     pub address: Option<String>,
+}
+
+/// Removes the clients' IP addresses (`connection.address`) anywhere in serialized platform
+/// data: snapshots, events and event envelopes.
+pub fn strip_client_addresses(value: &mut serde_json::Value) {
+    match value {
+        serde_json::Value::Object(map) => {
+            if let Some(serde_json::Value::Object(connection)) = map.get_mut("connection") {
+                connection.remove("address");
+            }
+            map.values_mut().for_each(strip_client_addresses);
+        }
+        serde_json::Value::Array(items) => items.iter_mut().for_each(strip_client_addresses),
+        _ => {}
+    }
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
@@ -231,6 +247,18 @@ pub struct Snapshot {
     pub channels: Vec<Channel>,
     pub server_groups: Vec<ServerGroup>,
     pub channel_groups: Vec<ChannelGroup>,
+}
+
+impl Snapshot {
+    /// The snapshot without the clients' IP addresses.
+    pub fn without_addresses(mut self) -> Self {
+        for client in &mut self.clients {
+            if let Some(connection) = &mut client.connection {
+                connection.address = None;
+            }
+        }
+        self
+    }
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -514,5 +542,21 @@ mod tests {
             json,
             serde_json::json!({ "type": "groupsUpdate", "serverGroups": [], "channelGroups": [] })
         );
+    }
+
+    #[test]
+    fn client_addresses_are_stripped_everywhere() {
+        let mut value = serde_json::json!({
+            "instance": "music",
+            "event": { "type": "clientUpdate", "client": { "id": "5", "connection": { "pingMs": 9.0, "address": "203.0.113.7" } } },
+            "snapshot": { "clients": [{ "connection": { "address": "198.51.100.1" } }, { "connection": null }] }
+        });
+        strip_client_addresses(&mut value);
+        let text = value.to_string();
+        assert!(
+            !text.contains("203.0.113.7") && !text.contains("198.51.100.1"),
+            "{text}"
+        );
+        assert_eq!(value["event"]["client"]["connection"]["pingMs"], 9.0);
     }
 }

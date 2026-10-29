@@ -302,6 +302,8 @@ impl PlatformAdapter for TeamSpeakAdapter {
             can_send_audio: true,
             reconnecting: false,
             audio_closed: false,
+            reapply_pending: false,
+            info_limiter: InfoLimiter::default(),
         };
         // The join of the default channel may have been refused: check and apply.
         session.reapply(&mut con);
@@ -362,6 +364,49 @@ struct Session {
     reconnecting: bool,
     /// The audio sender was dropped (engine gone); stop polling it.
     audio_closed: bool,
+    /// The settings are applied once the own client is in the book (it arrives after the
+    /// first server state).
+    reapply_pending: bool,
+    info_limiter: InfoLimiter,
+}
+
+/// Shortest interval between two info requests for the same client.
+const INFO_INTERVAL: std::time::Duration = std::time::Duration::from_secs(10);
+/// Most clients whose info is requested per second.
+const INFO_BURST: usize = 10;
+
+/// Limits client info requests (two commands each) to stay clear of the server's anti-flood.
+#[derive(Default)]
+struct InfoLimiter {
+    /// Last request per client.
+    last: HashMap<String, std::time::Instant>,
+    /// Requests in the current second.
+    window: Option<(std::time::Instant, usize)>,
+}
+
+impl InfoLimiter {
+    fn allow(&mut self, client: &str, now: std::time::Instant) -> bool {
+        if self
+            .last
+            .get(client)
+            .is_some_and(|at| now.duration_since(*at) < INFO_INTERVAL)
+        {
+            return false;
+        }
+        let (start, count) = match self.window {
+            Some((start, count)) if now.duration_since(start) < std::time::Duration::from_secs(1) => {
+                (start, count)
+            }
+            _ => (now, 0),
+        };
+        if count >= INFO_BURST {
+            return false;
+        }
+        self.window = Some((start, count + 1));
+        self.last.retain(|_, at| now.duration_since(*at) < INFO_INTERVAL);
+        self.last.insert(client.to_owned(), now);
+        true
+    }
 }
 
 enum Input {
@@ -422,6 +467,7 @@ impl Session {
                 if self.reconnecting {
                     // After a reconnect all client ids are new: publish a fresh snapshot.
                     self.reconnecting = false;
+                    self.info_limiter = InfoLimiter::default();
                     tracing::info!("reconnected");
                     let _ = ctx.events.send(PlatformEvent::Connected {
                         snapshot: snapshot(state),
@@ -434,6 +480,9 @@ impl Session {
                 let converted = events.iter().filter_map(|e| convert::event(state, e)).collect();
                 for event in convert::coalesce(converted) {
                     let _ = ctx.events.send(event);
+                }
+                if self.reapply_pending {
+                    self.reapply(con);
                 }
             }
             StreamItem::MessageResult(handle, result) => {
@@ -466,7 +515,12 @@ impl Session {
             PlatformCommand::UpdateSettings { settings, reply } => match parse_settings(&settings) {
                 Ok(new) => {
                     self.config = new;
-                    self.apply_live(con, reply);
+                    if self.reapply_pending {
+                        // Applied as soon as the own client is known.
+                        let _ = reply.send(Ok(()));
+                    } else {
+                        self.apply_live(con, reply);
+                    }
                 }
                 Err(e) => {
                     let _ = reply.send(Err(e));
@@ -721,6 +775,24 @@ impl Session {
                 self.send(con, result, reply);
             }
             PlatformCommand::RequestClientInfo { client, reply } => {
+                // Several plugins polling the same clients must not get the bot flood-banned:
+                // a client's data is requested at most every INFO_INTERVAL, and at most
+                // INFO_BURST clients per second; other requests fail with "throttled". Only
+                // clients that exist count.
+                if let Err(e) = with_client(con, &client, |c| Ok(c.connection_info().to_packet())) {
+                    let _ = reply.send(Err(e));
+                    return;
+                }
+                // Keyed by the parsed id ("5" and "05" are the same client).
+                let key = parse_client(Some(&client))
+                    .map(|id| id.0.to_string())
+                    .unwrap_or_else(|_| client.clone());
+                if !self.info_limiter.allow(&key, std::time::Instant::now()) {
+                    let _ = reply.send(Err(anyhow!(
+                        "throttled: the client's info was requested recently"
+                    )));
+                    return;
+                }
                 // Variables (version, platform, connection count) and connection info both
                 // update the book, which emits ClientUpdate events.
                 let variables = with_client(con, &client, |c| Ok(c.variables().to_packet()));
@@ -766,6 +838,12 @@ impl Session {
     /// Applies the settings after (re)connecting: where the bot ended up is not known yet.
     fn reapply(&mut self, con: &mut Connection) {
         *self.applied_channel.lock() = None;
+        self.reapply_pending = !con
+            .get_state()
+            .is_ok_and(|state| state.clients.contains_key(&state.own_client));
+        if self.reapply_pending {
+            return;
+        }
         let (reply, result) = tokio::sync::oneshot::channel();
         self.apply_live(con, reply);
         tokio::spawn(async move {
@@ -1045,5 +1123,30 @@ mod identity_import_tests {
             "no private key in the description"
         );
         assert!(factory.describe_credentials(&serde_json::json!({})).is_none());
+    }
+}
+
+#[cfg(test)]
+mod info_limiter_tests {
+    use super::*;
+    use std::time::{Duration, Instant};
+
+    #[test]
+    fn info_requests_are_limited_per_client_and_per_second() {
+        let mut limiter = InfoLimiter::default();
+        let start = Instant::now();
+        assert!(limiter.allow("1", start));
+        assert!(
+            !limiter.allow("1", start + Duration::from_secs(5)),
+            "same client too soon"
+        );
+        let allowed = (2..30).filter(|id| limiter.allow(&id.to_string(), start)).count();
+        assert_eq!(allowed, INFO_BURST - 1, "burst per second");
+        let later = start + Duration::from_secs(2);
+        assert!(limiter.allow("29", later), "a new second allows more");
+        assert!(
+            limiter.allow("1", start + INFO_INTERVAL),
+            "same client after the interval"
+        );
     }
 }

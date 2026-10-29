@@ -15,6 +15,8 @@ export interface Manifest {
   author: string;
   engine: string | null;
   permissions: string[];
+  /** Usable when an administrator grants them; the plugin runs without. */
+  optionalPermissions: string[];
   config: unknown[];
   platforms: string[];
   autorun: boolean;
@@ -48,6 +50,9 @@ const SINUSBOT_MODULES: Record<string, string | null> = {
 };
 
 const SINUSBOT_BACKENDS: Record<string, string> = { ts3: 'teamspeak', discord: 'discord' };
+
+/** What SinusBot lets every script do without declaring it: offered, granted by an admin. */
+const SINUSBOT_OPTIONAL = ['moderation', 'channels', 'playlists'];
 
 export function discover(pluginsDir: string, version: string): { plugins: Discovered[]; errors: { id: string; error: string }[] } {
   const plugins: Discovered[] = [];
@@ -116,6 +121,7 @@ function native(dir: string, id: string, version: string): Discovered | null {
       author: typeof pkg.author === 'string' ? pkg.author : String(pkg.author?.name ?? ''),
       engine,
       permissions: strings(james.permissions, 'james.permissions'),
+      optionalPermissions: strings(james.optionalPermissions, 'james.optionalPermissions'),
       config: james.config ?? [],
       platforms: strings(james.platforms, 'james.platforms'),
       autorun: james.autorun === true,
@@ -143,6 +149,8 @@ function sinusbot(scriptsDir: string, file: string): Discovered {
     if (permission) permissions.add(permission);
   }
   if (hasWeb) permissions.add('web');
+  // James extension (SinusBot ignores it): permissions a script needs, e.g. ['moderation'].
+  for (const permission of strings(manifest.permissions, 'permissions')) permissions.add(permission);
   const backends = manifest.backends === undefined ? ['ts3'] : strings(manifest.backends, 'backends');
   return {
     manifest: {
@@ -155,6 +163,7 @@ function sinusbot(scriptsDir: string, file: string): Discovered {
       // SinusBot engine versions are not James versions.
       engine: null,
       permissions: [...permissions],
+      optionalPermissions: SINUSBOT_OPTIONAL.filter((p) => !permissions.has(p)),
       config: Array.isArray(manifest.vars) ? manifest.vars : [],
       platforms: backends.map((b) => SINUSBOT_BACKENDS[b]).filter((b): b is string => !!b),
       autorun: manifest.autorun === true,

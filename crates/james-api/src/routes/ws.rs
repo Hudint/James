@@ -63,7 +63,14 @@ async fn stream(mut socket: WebSocket, state: AppState, mut auth: Auth, token: S
                     {
                         continue;
                     }
-                    let Ok(text) = serde_json::to_string(&envelope) else { continue };
+                    let Ok(mut text) = serde_json::to_string(&envelope) else { continue };
+                    // Client IP addresses are personal data the web interface does not need
+                    // (only client data carries an "address" field).
+                    if text.contains("\"address\"") {
+                        let Ok(mut value) = serde_json::to_value(&envelope) else { continue };
+                        james_core::platform::strip_client_addresses(&mut value);
+                        text = value.to_string();
+                    }
                     if !send_text(&mut socket, text).await {
                         break;
                     }

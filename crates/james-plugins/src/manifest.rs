@@ -28,9 +28,13 @@ pub struct Manifest {
     /// Required James version (semver range), checked by the host.
     #[serde(default)]
     pub engine: Option<String>,
-    /// Requested permissions (see [`PERMISSIONS`]).
+    /// Requested permissions (see [`PERMISSIONS`]); all must be granted to enable the plugin.
     #[serde(default)]
     pub permissions: Vec<String>,
+    /// Permissions the plugin can use when granted, but runs without (an administrator
+    /// chooses; e.g. what SinusBot scripts may do without declaring it).
+    #[serde(default)]
+    pub optional_permissions: Vec<String>,
     /// Configuration fields shown in the web interface (SinusBot `vars` schema).
     #[serde(default)]
     pub config: Vec<serde_json::Value>,
@@ -71,13 +75,12 @@ impl Manifest {
         self.platforms.is_empty() || self.platforms.iter().any(|p| p == platform)
     }
 
-    /// Requested permissions that are not part of the catalog.
-    pub fn unknown_permissions(&self) -> Vec<&str> {
+    /// Whether `permission` may be granted (requested or optional).
+    pub fn grantable(&self, permission: &str) -> bool {
         self.permissions
             .iter()
-            .map(String::as_str)
-            .filter(|p| permission(p).is_none())
-            .collect()
+            .chain(&self.optional_permissions)
+            .any(|p| p == permission)
     }
 }
 
@@ -116,7 +119,8 @@ pub const PERMISSIONS: &[Permission] = &[
         id: "moderation",
         enforced: true,
         risk: Risk::High,
-        description: "Kick, ban and move clients and change their server and channel groups",
+        description:
+            "Kick, ban and move clients, change their server and channel groups and see their IP addresses",
     },
     Permission {
         id: "channels",
@@ -200,7 +204,7 @@ mod tests {
     }
 
     #[test]
-    fn platform_support_and_unknown_permissions() {
+    fn platform_support() {
         let manifest: Manifest = serde_json::from_value(serde_json::json!({
             "id": "x", "kind": "sinusbot", "name": "X",
             "permissions": ["http", "teleport"], "platforms": ["teamspeak"]
@@ -208,6 +212,17 @@ mod tests {
         .unwrap();
         assert!(manifest.supports("teamspeak"));
         assert!(!manifest.supports("discord"));
-        assert_eq!(manifest.unknown_permissions(), ["teleport"]);
+    }
+
+    #[test]
+    fn optional_permissions_are_grantable() {
+        let manifest: Manifest = serde_json::from_value(serde_json::json!({
+            "id": "x", "kind": "sinusbot", "name": "X",
+            "permissions": ["http"], "optionalPermissions": ["moderation", "warp"]
+        }))
+        .unwrap();
+        assert!(manifest.grantable("http"));
+        assert!(manifest.grantable("moderation"));
+        assert!(!manifest.grantable("fs"), "neither requested nor offered");
     }
 }

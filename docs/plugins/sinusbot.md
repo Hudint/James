@@ -24,12 +24,19 @@ the same [permissions](README.md#permissions) as native plugins.
 | `autorun`, `hidden` | ✓ |
 | `backends` | ✓ `ts3` → TeamSpeak (3 and 6), `discord` → Discord; default `ts3` |
 | `requiredModules` | ✓ mapped to permissions: `http` → `http`, `net` → `net`, `ws` → `web`, `db` → `db`, `fs` → `fs`; `graphics` and `discord-dangerous` need none |
+| `permissions` | James extension: further required [permissions](README.md#permissions), e.g. `['moderation']` for a script that moves clients |
 | `enableWeb` | ✓ requests `web`; files from `<script name>/html/` |
 | `engine` | ignored (refers to SinusBot versions) |
 | `voiceCommands` | ✗ speech recognition is not available yet |
 
 `registerPlugin(manifest, main)` calls `main(_, config, meta)` once per instance; `_` is
 `undefined` (the legacy `sinusbot` object is deprecated in SinusBot as well).
+
+SinusBot has no permissions for moving clients, editing channels or changing playlists, so every
+script additionally offers `moderation`, `channels` and `playlists` as optional permissions: the
+administrator ticks the ones a script needs when enabling it (also later, under **Instances**).
+Without them, such calls fail and are logged. Other permissions (e.g. `users` for
+`engine.getUsers()`) must be requested with the `permissions` field.
 
 ## Differences
 
@@ -40,8 +47,16 @@ the same [permissions](README.md#permissions) as native plugins.
 - **`audio.say(text, locale)`** speaks with James' voices: the locale (or the one set with
   `audio.setTTSDefaultLocale`) picks the best installed voice; `audio.setTTSURL` is not supported.
 - **Positions** (`audio.getTrackPosition`, `audio.seek`) are in milliseconds.
-- **Track ids** are `<source>:<locator>`. `media.getTrackByID` and `media.search` work on the local
-  library; `track.url()` returns something `media.playURL` accepts.
+- **Track ids** are URLs for tracks played from a URL (the URL the script played, even when James
+  normalises it) and `local:<path>` for local files. `media.getTrackByID` accepts these and
+  library ids, so a script can store a URL where SinusBot stored a song id. `media.search` works on
+  the local library; `track.url()` returns something `media.playURL` accepts.
+- **`audio.isPlaying()`** is also `true` while a track the script started is still being loaded
+  (and two seconds after), so scripts that start a track when nothing plays do not repeat it.
+- **Connection data** (`getIPAddress`, `getIdleTime`, `getPing`, …) is loaded from TeamSpeak when
+  a script first reads it and refreshed every 30 seconds, so the first read returns empty values.
+  `getIPAddress()` is empty unless the script has the `moderation` permission and the bot the
+  TeamSpeak permission `b_client_remoteaddress_view`.
 - **Users** are James accounts. SinusBot's privilege bitmasks are replaced by roles: `privileges()`
   reports all bits for administrators and none otherwise, and the `set*Privilege*` methods do
   nothing. User methods need the `users` permission; administrators cannot be changed.

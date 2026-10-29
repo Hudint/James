@@ -44,6 +44,8 @@ class Host {
   storeDelay = 0;
   /** Delay of instance.info answers (a context start in progress). */
   infoDelay = 0;
+  /** Delay of media.play answers (James resolving a URL). */
+  playDelay = 0;
 
   constructor(flags: string[], env: Record<string, string> = {}, cwd?: string) {
     this.process = spawn(process.execPath, ['--disable-warning=ExperimentalWarning', '--disable-warning=SecurityWarning', ...flags, path.join(hostDir, 'src/main.ts')], {
@@ -110,6 +112,13 @@ class Host {
         case 'store.unset':
           await new Promise((r) => setTimeout(r, this.storeDelay));
           return null;
+        case 'media.play': {
+          await new Promise((r) => setTimeout(r, this.playDelay));
+          const input: string | undefined = params.params.input;
+          // Like the YouTube resolver: the track's locator is the canonical URL.
+          const locator = input?.replace('https://youtu.be/', 'https://www.youtube.com/watch?v=');
+          return input ? [{ id: 1, track: { source: 'youtube', locator, title: 'Video', isStream: false } }] : [];
+        }
         case 'playlists.list':
           return [{ id: 1, name: 'Chill', trackCount: 0 }, { id: 2, name: 'Rock', trackCount: 3 }];
         case 'client.kick':
@@ -164,8 +173,21 @@ test('discovers native plugins and SinusBot scripts', async () => {
   assert.deepEqual(byId.greeter.paths.readable, [path.join(fixtures, 'greeter')]);
   assert.equal(byId.legacy.kind, 'sinusbot');
   assert.deepEqual(byId.legacy.permissions, ['http']);
+  // SinusBot has no permissions for these, so scripts offer them all as optional.
+  assert.deepEqual(byId.legacy.optionalPermissions, ['moderation', 'channels', 'playlists']);
+  assert.deepEqual(byId.greeter.optionalPermissions, []);
   assert.deepEqual(byId.legacy.platforms, ['teamspeak']);
   assert.equal(byId.legacy.config[0].name, 'prefix');
+});
+
+test('SinusBot scripts can require James permissions', async () => {
+  const dir = path.join(tmp, 'sb-permissions');
+  fs.mkdirSync(dir, { recursive: true });
+  fs.writeFileSync(path.join(dir, 'mover.js'), "registerPlugin({ name: 'Mover', requiredModules: ['http'], permissions: ['moderation', 'bogus'] }, function () {});");
+  const result = await Host.discover(dir);
+  const mover = result.plugins.find((p: any) => p.id === 'mover');
+  assert.deepEqual([...mover.permissions].sort(), ['bogus', 'http', 'moderation']);
+  assert.deepEqual(mover.optionalPermissions, ['channels', 'playlists']);
 });
 
 test('discovery rejects duplicate ids and scripts escaping the probe', async () => {
@@ -261,6 +283,39 @@ test('SinusBot script: compat modules, sync calls, events', async () => {
     assert.equal(list.params.text, 'playlists: Chill,Rock');
     await host.wait('plugin store write', () => host.find('store.set'));
     assert.equal(host.find('store.set')!.params.scope, 'plugin');
+
+    // Scripts store URLs where SinusBot stored song ids.
+    host.event('platform', { event: { type: 'message', mode: 'client', from: alice, text: 'track https://youtu.be/abc' } });
+    const url = await host.wait('URL track', () => host.calls.find((c) => c.method === 'chat.send' && c.params.text.startsWith('track https')));
+    assert.equal(url.params.text, 'track https://youtu.be/abc url');
+    assert.deepEqual(host.find('media.play')!.params, { input: 'https://youtu.be/abc', mode: 'now' });
+    host.event('platform', { event: { type: 'message', mode: 'client', from: alice, text: 'track local:/music/a.mp3' } });
+    const id = await host.wait('track id', () => host.calls.find((c) => c.method === 'chat.send' && c.params.text.startsWith('track local')));
+    assert.equal(id.params.text, 'track local:/music/a.mp3 local');
+    const played = host.calls.filter((c) => c.method === 'media.play')[1];
+    assert.deepEqual(played.params.tracks[0], { source: 'local', locator: '/music/a.mp3', title: 'a.mp3', artist: null, album: null, durationMs: null, thumbnail: null, isStream: false });
+    // Other sources use URLs as ids.
+    host.event('platform', { event: { type: 'message', mode: 'client', from: alice, text: 'track ytdlp:abc' } });
+    await host.wait('unknown source', () => host.calls.find((c) => c.method === 'chat.send' && c.params.text === 'no track'));
+    // A track counts as playing while James resolves it, and keeps the URL the script used as id.
+    host.playDelay = 300;
+    host.event('platform', { event: { type: 'message', mode: 'client', from: alice, text: 'track https://youtu.be/def' } });
+    host.event('platform', { event: { type: 'message', mode: 'client', from: alice, text: 'id https://example.com/x' } });
+    const pending = await host.wait('pending play', () => host.calls.find((c) => c.method === 'chat.send' && c.params.text.startsWith('id https://example')));
+    assert.equal(pending.params.text, 'id https://example.com/x playing=true');
+    await host.wait('play answered', () => host.calls.filter((c) => c.method === 'media.play' && c.done).length === 3);
+    host.event('platform', { event: { type: 'message', mode: 'client', from: alice, text: 'id https://www.youtube.com/watch?v=def' } });
+    const alias = await host.wait('alias', () => host.calls.find((c) => c.method === 'chat.send' && c.params.text.startsWith('id https://youtu.be/def')));
+    // Still "playing" shortly after the answer (the status event may come later).
+    assert.equal(alias.params.text, 'id https://youtu.be/def playing=true');
+    host.event('platform', { event: { type: 'message', mode: 'client', from: alice, text: 'track nonsense' } });
+    await host.wait('unknown id', () => host.calls.filter((c) => c.method === 'chat.send' && c.params.text === 'no track').length === 2);
+
+    // Connection data is requested on first use (once, not per getter call).
+    host.event('platform', { event: { type: 'message', mode: 'client', from: alice, text: 'ip' } });
+    const ip = await host.wait('ip', () => host.calls.find((c) => c.method === 'chat.send' && c.params.text.startsWith('ip=')));
+    assert.equal(ip.params.text, 'ip= again=');
+    assert.deepEqual(host.calls.filter((c) => c.method === 'client.requestInfo').map((c) => c.params), [{ client: '5' }]);
 
     host.event('platform', { event: { type: 'message', mode: 'client', from: alice, text: 'say good morning' } });
     const say = await host.wait('audio.say', () => host.find('tts.say'));

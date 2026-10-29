@@ -27,6 +27,8 @@
   let scopeOnly = $state(false);
   let scope = $state<'all' | 'some'>('all');
   let chosen = $state<string[]>([]);
+  /** Optional permissions ticked in the dialog. */
+  let chosenOptional = $state<string[]>([]);
 
   // Settings panel
   let configuring = $state<string | null>(null);
@@ -133,6 +135,7 @@
     scopeOnly = onlyScope;
     scope = plugin.state.instances === null ? 'all' : 'some';
     chosen = plugin.state.instances ?? instances.map((i) => i.id);
+    chosenOptional = optionalOf(plugin.manifest).filter((p) => plugin.state.grantedPermissions.includes(p));
     // The content must exist before showModal() so focus lands on Cancel.
     await tick();
     dialog?.showModal();
@@ -151,7 +154,7 @@
     try {
       const updated = await api.configurePlugin(plugin.manifest.id, {
         enabled: true,
-        permissions: plugin.manifest.permissions,
+        permissions: [...plugin.manifest.permissions, ...chosenOptional],
         instances: plugin.manifest.autorun || scope === 'all' ? null : chosen,
       });
       replace(updated);
@@ -302,10 +305,19 @@
     return plugin.status.state === 'needsApproval' ? plugin.status.missing : [];
   }
 
+  function optionalOf(manifest: PluginInfo['manifest']): string[] {
+    return (manifest.optionalPermissions ?? []).filter((p) => !manifest.permissions.includes(p));
+  }
+
   const dialogPermissions = $derived(enabling ? byRisk(enabling.manifest.permissions) : []);
+  const dialogOptional = $derived(enabling ? byRisk(optionalOf(enabling.manifest)) : []);
   const enforced = $derived(dialogPermissions.filter((id) => permission(id)?.enforced));
   const unenforced = $derived(dialogPermissions.filter((id) => permission(id) && !permission(id)!.enforced));
-  const highRisk = $derived(dialogPermissions.some((id) => permission(id)?.risk === 'high'));
+  /** Optional permissions granted in the dialog that are not granted yet. */
+  const newlyGranted = $derived(enabling ? chosenOptional.filter((p) => !enabling!.state.grantedPermissions.includes(p)) : []);
+  /** Optional permissions unticked in the dialog that are granted now. */
+  const revoked = $derived(enabling ? dialogOptional.filter((p) => enabling!.state.grantedPermissions.includes(p) && !chosenOptional.includes(p)) : []);
+  const highRisk = $derived([...dialogPermissions, ...newlyGranted].some((id) => permission(id)?.risk === 'high'));
 </script>
 
 <svelte:head><title>{t('plugins.title')} · James</title></svelte:head>
@@ -396,16 +408,20 @@
             {/if}
 
             <dl class="facts small">
-              {#if m.permissions.length}
+              {#if m.permissions.length || optionalOf(m).length}
                 <dt>{t('plugins.permissions')}</dt>
                 <dd>
                   <ul class="perm-list">
-                    {#each byRisk(m.permissions) as id (id)}
+                    {#each byRisk([...m.permissions, ...optionalOf(m)]) as id (id)}
+                      {@const optional = !m.permissions.includes(id)}
+                      {@const notGranted = optional && plugin.state.enabled && !plugin.state.grantedPermissions.includes(id)}
+                      {@const status = optional ? (notGranted ? `${t('common.optional')}, ${t('plugins.notGranted')}` : t('common.optional')) : ''}
                       <li>
-                        <span class="badge {riskTone(id)}" title={riskLabel(id)}>
-                          {#if permission(id)?.risk === 'high'}<Icon name="alert" size={12} />{/if}{permName(id)}<span class="visually-hidden">, {riskLabel(id)}</span>
+                        <span class="badge {riskTone(id)}" class:not-granted={notGranted} title={riskLabel(id)}>
+                          {#if permission(id)?.risk === 'high'}<Icon name="alert" size={12} />{/if}{permName(id)}<span class="visually-hidden">, {riskLabel(id)}{status ? `, ${status}` : ''}</span>
                         </span>
                         {#if added.includes(id)}<span class="badge accent">{t('plugins.new')}</span>{/if}
+                        {#if optional}<span class="small muted" aria-hidden="true">{status}</span>{/if}
                       </li>
                     {/each}
                   </ul>
@@ -514,7 +530,7 @@
     <h2 id="enable-title">{t(scopeOnly ? 'plugins.scopeTitle' : 'plugins.enableTitle', { name: m.name })}</h2>
     {#if !scopeOnly}
       <div id="enable-summary">
-        {#if m.permissions.length === 0}
+        {#if m.permissions.length === 0 && dialogOptional.length === 0}
           <p>{t('plugins.noPermissions')}</p>
         {/if}
         {#if enforced.length}
@@ -546,7 +562,21 @@
         </div>
       </div>
     {:else}
-      <p id="enable-summary">{t('plugins.scopeHint')}</p>
+      <p id="enable-summary">{t(dialogOptional.length ? 'plugins.scopeOptionalHint' : 'plugins.scopeHint')}</p>
+    {/if}
+
+    {#if dialogOptional.length}
+      <fieldset class="optional" aria-describedby="optional-hint">
+        <legend class="label">{t('plugins.optionalTitle')}</legend>
+        <p class="small muted" id="optional-hint">{t('plugins.optionalHint')}</p>
+        {#each dialogOptional as id (id)}
+          <label class="checkbox optional-perm">
+            <input type="checkbox" value={id} bind:group={chosenOptional} />
+            <span class="badge {riskTone(id)}">{#if permission(id)?.risk === 'high'}<Icon name="alert" size={12} />{/if}{permName(id)}</span>
+            <span>{describe(id)} <span class="risk {riskTone(id)}">({riskLabel(id)})</span></span>
+          </label>
+        {/each}
+      </fieldset>
     {/if}
 
     {#if m.autorun}
@@ -570,11 +600,21 @@
       </fieldset>
     {/if}
 
+    {#if scopeOnly && newlyGranted.some((id) => permission(id)?.risk === 'high')}
+      <div class="notice inline danger" role="note">
+        <Icon name="alert" size={18} />
+        <p class="small">{t('plugins.trustedCode')}</p>
+      </div>
+    {/if}
+    {#if revoked.length}
+      <p class="small muted" aria-live="polite">{t('plugins.revokes', { names: revoked.map(permName).join(', ') })}</p>
+    {/if}
+
     <div class="dialog-actions">
       <!-- svelte-ignore a11y_autofocus -->
       <button class="btn" onclick={() => dialog?.close()} autofocus>{t('common.cancel')}</button>
       <button class="btn btn-primary" onclick={confirmDialog} disabled={scope === 'some' && chosen.length === 0 && !m.autorun} aria-describedby={scope === 'some' && chosen.length === 0 ? 'choose-hint' : undefined}>
-        {scopeOnly ? t('common.save') : m.permissions.length ? t('plugins.grantAndEnable') : t('plugins.enable')}
+        {#if scopeOnly}{newlyGranted.length ? t('plugins.grantAndSave') : t('common.save')}{:else}{m.permissions.length || chosenOptional.length ? t('plugins.grantAndEnable') : t('plugins.enable')}{/if}
       </button>
     </div>
   {/if}
@@ -644,7 +684,12 @@
   }
   .perm-list li {
     display: flex;
+    flex-wrap: wrap;
+    align-items: center;
     gap: var(--space-1);
+  }
+  .perm-list li > .muted {
+    white-space: nowrap;
   }
   .actions {
     flex-wrap: wrap;
@@ -744,6 +789,40 @@
   }
   .risk.warning {
     color: var(--warning);
+  }
+  /* Not granted: outlined instead of filled (keeps the text contrast). */
+  .badge.not-granted {
+    background: transparent;
+    border: 1px dashed currentColor;
+  }
+  .optional {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-2);
+    margin: var(--space-3) 0;
+  }
+  /* Checkbox, badge and description in columns; the checkbox lines up with the badge. */
+  .optional .optional-perm {
+    display: grid;
+    grid-template-columns: auto auto 1fr;
+    align-items: start;
+    gap: var(--space-2);
+    font-size: var(--text-base);
+  }
+  .optional .optional-perm input {
+    margin: 2px 0 0;
+  }
+  @media (max-width: 480px) {
+    /* Badge above the description. */
+    .optional .optional-perm {
+      grid-template-columns: auto 1fr;
+    }
+    .optional .optional-perm > .badge {
+      justify-self: start;
+    }
+    .optional .optional-perm > span:last-child {
+      grid-column: 2;
+    }
   }
   .scope {
     display: flex;

@@ -34,6 +34,11 @@ const MODES: Record<string, number> = { client: 1, channel: 2, server: 3 };
 
 // ---- wrappers ---------------------------------------------------------------------------------
 
+/** How long connection data of a client stays fresh before a getter asks TeamSpeak again. */
+const CONNECTION_INFO_MS = 30_000;
+/** Most clients whose connection data a script requests per second (James limits it too). */
+const CONNECTION_INFO_BURST = 10;
+
 class SinusbotClient {
   #ctx: Context;
   #bot: Bot;
@@ -44,7 +49,36 @@ class SinusbotClient {
     this.ref = ref;
   }
   #d() { return this.ref.data(); }
-  #c() { return this.#d().connection ?? {}; }
+  /**
+   * SinusBot keeps connection data (IP, idle time, …) loaded; James loads it on request. Reading it
+   * asks for fresh data at most every 30 s per client, so polling scripts see it from the next poll.
+   * The IP address is only passed to scripts with the `moderation` permission.
+   */
+  #c() {
+    const data = this.#d();
+    if (!data.isSelf) {
+      const requested: Map<string, number> = (this.#ctx.extra.infoRequested ??= new Map());
+      // Client ids are reused after a client left.
+      const key = `${data.id}:${data.uid}`;
+      const last = requested.get(key);
+      const now = Date.now();
+      // Clients beyond the burst are requested on a later read.
+      const second = Math.floor(now / 1000);
+      if (this.#ctx.extra.infoSecond !== second) [this.#ctx.extra.infoSecond, this.#ctx.extra.infoCount] = [second, 0];
+      if ((last === undefined || now - last > CONNECTION_INFO_MS) && this.#ctx.extra.infoCount < CONNECTION_INFO_BURST) {
+        this.#ctx.extra.infoCount++;
+        requested.delete(key);
+        requested.set(key, now);
+        if (requested.size > 1000) requested.delete(requested.keys().next().value!);
+        this.ref.requestInfo().catch((error: any) => {
+          // Not asked (e.g. James throttled it): try again on a later read.
+          if (requested.get(key) === now) requested.delete(key);
+          this.#ctx.log('debug', `connection data of ${data.name}: ${error?.message ?? error}`);
+        });
+      }
+    }
+    return data.connection ?? {};
+  }
   name() { return this.#d().name; }
   nick() { return this.#d().name; }
   phoneticName() { return this.#d().phoneticName; }
@@ -238,12 +272,43 @@ function wrapGroup(ctx: Context, bot: Bot, kind: 'server' | 'channel', id: strin
   };
 }
 
+const isUrl = (value: string) => /^https?:\/\//i.test(value);
+
+/** How long a started track counts as playing after James answered (see `starting`). */
+const STARTING_GRACE_MS = 2_000;
+/** Most URL aliases remembered per script (see `starting`). */
+const MAX_ALIASES = 100;
+
+/**
+ * Plays `input` and counts it as playing until James answered: SinusBot starts tracks at once, and
+ * scripts commonly poll `audio.isPlaying()` to start one, which would otherwise repeat the request
+ * every poll while James resolves the URL. A single track resolved from a URL keeps that URL as its
+ * id, so scripts recognise "their" track even when James normalises the URL.
+ */
+function starting(ctx: Context, what: string, play: Promise<unknown>, input?: string): boolean {
+  ctx.extra.starting = (ctx.extra.starting ?? 0) + 1;
+  const done = play.then((items: any) => {
+    if (input === undefined || !Array.isArray(items) || items.length !== 1) return;
+    const aliases: Map<string, string> = (ctx.extra.aliases ??= new Map());
+    aliases.delete(items[0].track.locator);
+    aliases.set(items[0].track.locator, input);
+    if (aliases.size > MAX_ALIASES) aliases.delete(aliases.keys().next().value!);
+  });
+  // The playback status reaches the script separately from the answer: stay "playing" briefly.
+  return fire(ctx, what, done.finally(() => setTimeout(() => ctx.extra.starting--, STARTING_GRACE_MS)));
+}
+
 function sTrack(ctx: Context, bot: Bot, track: any) {
   if (!track) return undefined;
   const url = track.locator;
-  const play = (mode: string) => fire(ctx, 'play', bot.player.play(track, mode));
+  // A track known only by its URL is resolved by James when played.
+  const play = (mode: string) => starting(ctx, 'play', bot.player.play(track.input ?? track, mode), track.input);
   return {
-    id: () => `${track.source}:${track.locator}`,
+    // URLs are their own id (scripts keep ids in their settings, e.g. "play this song").
+    id: () => {
+      const locator = String(track.locator);
+      return isUrl(locator) ? (ctx.extra.aliases?.get(locator) ?? locator) : `${track.source}:${locator}`;
+    },
     url: () => url,
     type: () => track.source,
     title: () => track.title ?? '',
@@ -437,16 +502,26 @@ function modules(ctx: Context, bot: Bot, rt: Runtime, scriptModule: { exports: u
     return jobId;
   };
   const media = {
-    playURL: (url: string) => fire(ctx, 'playURL', bot.player.play(String(url), 'now')),
+    playURL: (url: string) => starting(ctx, 'playURL', bot.player.play(String(url), 'now'), String(url)),
     getCurrentTrack: () => currentTrack(),
+    // A library id, a URL (YouTube, SoundCloud, a stream, …) or a local file's id (`local:<path>`).
+    // SinusBot's own ids do not exist in James: settings holding them need a URL instead.
     getTrackByID: (id: string) => {
-      const numeric = /^\d+$/.test(String(id)) ? Number(id) : null;
-      if (numeric === null) return undefined;
-      return tryOr(ctx, 'getTrackByID', () => sTrack(ctx, bot, libraryTrack(ctx.callSync('library.get', { id: numeric }))), undefined);
+      const value = String(id ?? '').trim();
+      if (/^\d+$/.test(value)) {
+        return tryOr(ctx, 'getTrackByID', () => sTrack(ctx, bot, libraryTrack(ctx.callSync('library.get', { id: Number(value) }))), undefined);
+      }
+      if (isUrl(value)) return sTrack(ctx, bot, { source: 'url', locator: value, title: value, input: value });
+      // Local files (other sources use URLs as ids).
+      if (value.startsWith('local:') && value.length > 6) {
+        const locator = value.slice(6);
+        return sTrack(ctx, bot, { source: 'local', locator, title: path.basename(locator), artist: null, album: null, durationMs: null, thumbnail: null, isStream: false });
+      }
+      return undefined;
     },
     getTracks: () => tryOr(ctx, 'getTracks', () => ctx.callSync('library.search', { query: '', limit: 200 }).map((t: any) => sTrack(ctx, bot, libraryTrack(t))), []),
     search: (query: string) => tryOr(ctx, 'search', () => ctx.callSync('library.search', { query: String(query), limit: 20 }).map((t: any) => sTrack(ctx, bot, libraryTrack(t))), []),
-    enqueue: (url: string) => fire(ctx, 'enqueue', bot.player.play(String(url), 'append')),
+    enqueue: (url: string) => starting(ctx, 'enqueue', bot.player.play(String(url), 'append'), String(url)),
     playAsNext: (url: string) => fire(ctx, 'playAsNext', bot.player.play(String(url), 'next')),
     playNext: () => fire(ctx, 'playNext', bot.player.skip()),
     playPrevious: () => fire(ctx, 'playPrevious', bot.player.previous()),
@@ -506,7 +581,7 @@ function modules(ctx: Context, bot: Bot, rt: Runtime, scriptModule: { exports: u
       }
       return true;
     },
-    isPlaying: () => !!bot.player.current && !bot.player.status.paused,
+    isPlaying: () => (ctx.extra.starting ?? 0) > 0 || (!!bot.player.current && !bot.player.status.paused),
     say: (text: string, locale?: string) =>
       void fire(ctx, 'say', bot.say(String(text), { language: locale ?? ctx.extra.ttsLocale ?? undefined })),
     setStreamVolume: () => unsupported(ctx, 'per-stream volume'),

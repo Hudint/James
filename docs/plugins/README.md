@@ -68,6 +68,7 @@ The `james` section of `package.json`:
 | `name` | string | Display name (default: the package name). |
 | `engine` | string | Required James version, e.g. `">=0.1.0"` (`>=`, `>`, `<=`, `<`, `=`, `^`, `~`). |
 | `permissions` | string[] | Permissions the plugin needs ([list](#permissions)). An administrator confirms them. |
+| `optionalPermissions` | string[] | Permissions the plugin can use but runs without. The administrator chooses which of them to grant; calls that need a missing one fail with a permission error. |
 | `config` | field[] | Settings shown in the web interface, stored per instance ([fields](#settings)). |
 | `platforms` | string[] | `teamspeak`, `discord`; default: all. |
 | `autorun` | boolean | Active on every instance; cannot be restricted to some instances. |
@@ -183,7 +184,11 @@ same object, so `===` works. After a client leaves, its object keeps the last kn
 `client.online` is `false`. Fields include `uid`, `name`, `channel`, `serverGroups`, `databaseId`,
 `away`, `inputMuted`, `outputMuted`, `recording`, `description`, `country`, `talkPower`, `info`
 (version, platform, creation time, connection count) and `connection` (ping, packet loss, bytes,
-idle time, IP address). TeamSpeak sends `info` and `connection` only on request:
+idle time, IP address). TeamSpeak sends `info` and `connection` only on request (at most every
+10 seconds per client and for 10 clients per second, to stay clear of the server's anti-flood
+protection). The IP address is personal data: plugins only receive it with the `moderation`
+permission, the web interface never, and the bot needs the TeamSpeak permission
+`b_client_remoteaddress_view` to see it.
 
 ```ts
 await client.requestInfo();
@@ -347,7 +352,7 @@ the plugin (`fetch` with the `http` permission) and hand it to the page through 
 
 | Permission | Allows | Enforced by |
 |---|---|---|
-| `moderation` | Kick, ban and move clients, change server and channel groups | James |
+| `moderation` | Kick, ban and move clients, change server and channel groups, see client IP addresses | James |
 | `channels` | Create, edit, move and delete channels | James |
 | `playlists` | Create, change and delete saved playlists | James |
 | `instances` | Start, stop and inspect all instances (also act on instances the plugin is not active on) | James |

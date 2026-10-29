@@ -126,6 +126,8 @@ export interface PluginManifest {
   description: string;
   author: string;
   permissions: string[];
+  /** Permissions the plugin can use when granted but runs without. */
+  optionalPermissions?: string[];
   config: ConfigField[];
   platforms: string[];
   autorun: boolean;

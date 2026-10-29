@@ -50,6 +50,11 @@ export interface Manifest {
   engine?: string;
   /** Permissions the plugin needs; an administrator confirms them when enabling the plugin. */
   permissions?: Permission[];
+  /**
+   * Permissions the plugin can use when granted but runs without; the administrator picks them
+   * when enabling the plugin. Check before use, e.g. by catching the permission error.
+   */
+  optionalPermissions?: Permission[];
   /** Settings shown in the web interface, per instance. */
   config?: ConfigField[];
   /** Platforms the plugin supports (default: all). */
@@ -596,7 +601,10 @@ export interface ConnectionInfo {
   connectedMs: number | null;
   /** Time since the client's last activity, in milliseconds; `null` if not reported. */
   idleMs: number | null;
-  /** IP address; `null` unless the bot has the server permission to see it. */
+  /**
+   * IP address; `null` unless the plugin has the `moderation` permission and the bot the server
+   * permission to see it (`b_client_remoteaddress_view` on TeamSpeak).
+   */
   address: string | null;
 }
 
@@ -614,7 +622,11 @@ export interface Client extends Readonly<ClientData> {
   chat(text: string): Promise<void>;
   /** Pokes the client with a message (the platform's limit applies: about 100 characters on TeamSpeak). */
   poke(text: string): Promise<void>;
-  /** Asks the server for connection data and details; a `clientInfo` event follows. */
+  /**
+   * Asks the server for connection data and details; a `clientInfo` event follows. Rejects with
+   * an error starting with `throttled` when the client's info was requested in the last 10 seconds
+   * (by any plugin) or too many clients were requested this second.
+   */
   requestInfo(): Promise<void>;
   /** `moderation` */
   kick(reason?: string): Promise<void>;

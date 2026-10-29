@@ -391,6 +391,7 @@ impl PluginManager {
                 anyhow::bail!("checking the plugins failed: {e}");
             }
         };
+        let mut withdrawn = Vec::new();
         for (manifest, result) in checked {
             if let Err(error) = result {
                 errors.push(DiscoveryError {
@@ -407,13 +408,20 @@ impl PluginManager {
                 plugins.remove(&manifest.id);
                 continue;
             }
-            let state = states.get(&manifest.id).cloned().unwrap_or_else(|| PluginState {
+            let mut state = states.get(&manifest.id).cloned().unwrap_or_else(|| PluginState {
                 id: manifest.id.clone(),
                 enabled: false,
                 granted_permissions: Vec::new(),
                 config: json!({}),
                 instances: None,
             });
+            // Grants the plugin no longer offers are withdrawn for good: if a later version
+            // asks again, the administrator has to approve it again.
+            let granted = state.granted_permissions.len();
+            state.granted_permissions.retain(|p| manifest.grantable(p));
+            if state.granted_permissions.len() != granted {
+                withdrawn.push(state.clone());
+            }
             plugins.insert(
                 manifest.id.clone(),
                 Entry {
@@ -424,6 +432,12 @@ impl PluginManager {
                     web: HashMap::new(),
                 },
             );
+        }
+        for state in &withdrawn {
+            tracing::info!(plugin = %state.id, "withdrew permissions the plugin no longer offers");
+            if let Err(e) = self.db.save_plugin_state(state).await {
+                tracing::warn!(plugin = %state.id, error = %e, "cannot save the plugin's permissions");
+            }
         }
         let ids: Vec<String> = plugins.keys().cloned().collect();
         {
@@ -775,10 +789,10 @@ impl PluginManager {
                 PluginState {
                     id: id.to_owned(),
                     enabled,
-                    // Never more than requested.
+                    // Never more than requested (or offered as optional).
                     granted_permissions: permissions
                         .into_iter()
-                        .filter(|p| entry.manifest.permissions.contains(p))
+                        .filter(|p| entry.manifest.grantable(p))
                         .collect(),
                     config: entry.state.config.clone(),
                     instances,
@@ -1013,8 +1027,19 @@ impl PluginManager {
             return;
         };
         data["sensitive"] = Value::Bool(envelope.sensitive);
+        // Client IP addresses only reach plugins that may moderate (e.g. to match clients).
+        let mut without_addresses: Option<Value> = None;
         for plugin in plugins {
             if let Some(peer) = self.peer(&plugin) {
+                let data = if self.granted(&plugin, "moderation") {
+                    &data
+                } else {
+                    without_addresses.get_or_insert_with(|| {
+                        let mut stripped = data.clone();
+                        james_core::platform::strip_client_addresses(&mut stripped);
+                        stripped
+                    })
+                };
                 if !peer.notify("instance.event", data.clone()) {
                     tracing::warn!(%plugin, instance = %envelope.instance, "plugin overloaded, event dropped");
                 }
@@ -1216,6 +1241,18 @@ fn check_manifest(
     if !manifest::valid_id(&manifest.id) {
         return Err("invalid plugin id".into());
     }
+    // A plugin that needs an unknown permission can never be enabled; an unknown optional one
+    // is just not offered.
+    if let Some(unknown) = manifest
+        .permissions
+        .iter()
+        .find(|p| manifest::permission(p).is_none())
+    {
+        return Err(format!("unknown permission '{unknown}'"));
+    }
+    manifest
+        .optional_permissions
+        .retain(|p| manifest::permission(p).is_some());
     let reported = manifest.paths.take().ok_or("the plugin's files are unknown")?;
     let canonical = |path: &std::path::Path| std::fs::canonicalize(path).ok();
     let (dir, entry, own, readable) = match manifest.kind {
@@ -1441,6 +1478,22 @@ mod tests {
                 m
             })
             .unwrap()
+    }
+
+    #[test]
+    fn unknown_permissions_are_refused_or_dropped() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(tmp.path()).unwrap();
+        std::fs::write(root.join("script.js"), "").unwrap();
+        let mut required = manifest("script", PluginKind::Sinusbot, root.join("script.js"));
+        required.permissions = vec!["moderaton".into()];
+        let error = check_manifest(&root, &mut required, &mut HashMap::new()).unwrap_err();
+        assert_eq!(error, "unknown permission 'moderaton'");
+
+        let mut optional = manifest("script", PluginKind::Sinusbot, root.join("script.js"));
+        optional.optional_permissions = vec!["channels".into(), "teleport".into()];
+        check_manifest(&root, &mut optional, &mut HashMap::new()).unwrap();
+        assert_eq!(optional.optional_permissions, ["channels"]);
     }
 
     #[test]

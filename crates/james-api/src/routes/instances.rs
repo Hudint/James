@@ -553,7 +553,8 @@ async fn server(
             return Ok(Json(snapshot.clone()));
         }
     }
-    let snapshot = handle.snapshot().await?;
+    // Client IP addresses are personal data the web interface does not need.
+    let snapshot = handle.snapshot().await?.without_addresses();
     SNAPSHOTS
         .lock()
         .insert(id, (std::time::Instant::now(), snapshot.clone()));
