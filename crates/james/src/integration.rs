@@ -36,6 +36,26 @@ impl InstanceStore for DbStore {
     }
 }
 
+/// Names edited in the library, used when local files are played.
+pub struct LibraryNames(pub Db);
+
+#[async_trait]
+impl james_sources::local::LocalNames for LibraryNames {
+    async fn names(&self, path: &std::path::Path) -> Option<james_sources::local::FileNames> {
+        let names = self
+            .0
+            .library_names(path.to_str()?)
+            .await
+            .inspect_err(|e| tracing::debug!(error = %e, "failed to read library names"))
+            .ok()??;
+        Some(james_sources::local::FileNames {
+            title: names.title,
+            artist: names.artist,
+            album: names.album,
+        })
+    }
+}
+
 /// Chat command permissions from roles (`everyone`, linked account, platform groups).
 pub struct DbPermissions(pub Db);
 

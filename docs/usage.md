@@ -6,7 +6,10 @@
 - **Instance** – player (play/pause, skip, seek, volume, repeat, shuffle), queue (reorder, remove,
   jump), adding music (URL, search, library), speaking a text, and the server tree (move the bot by
   clicking a channel).
-- **Library** – music on the server; upload files (MP3, FLAC, OGG, WAV, …).
+- **Library** – music on the server; upload files (MP3, FLAC, OGG, WAV, …) and edit a track's title,
+  artist and album (pencil button). The file is not changed and a rescan keeps the edits; fields
+  left as in the file follow the file's tags. Tracks already in a queue or playlist keep the name they
+  had when they were added, and edits are lost when the file is moved or renamed on disk.
 - **Playlists** – saved lists; play them on any instance.
 - **Plugins** – for the instance chosen at the top: activate and deactivate plugins, their
   settings, and the permissions they get ([Plugins](plugins/README.md)).
@@ -74,7 +77,7 @@ Linked identities → Link identity** and send the shown `!link` code to the bot
 | `server.message` | Send chat messages as the bot |
 | `server.chat.read` | Read private chat and commands in the web interface |
 | `instance.view`, `instance.manage` | See / create, configure and delete instances |
-| `library.read`, `library.manage` | Browse / upload and rescan the library |
+| `library.read`, `library.manage` | Browse / upload, rename and rescan the library |
 | `playlist.read`, `playlist.manage` | See / edit playlists |
 | `plugins.use`, `plugins.manage` | Use plugin pages / install and configure plugins |
 | `users.manage` | Manage users and roles |

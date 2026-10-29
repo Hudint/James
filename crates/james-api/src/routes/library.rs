@@ -1,10 +1,10 @@
 //! Local media library: search, scan, upload.
 
-use axum::extract::{Multipart, Query, State};
+use axum::extract::{Multipart, Path, Query, State};
 use axum::http::StatusCode;
-use axum::routing::{get, post};
+use axum::routing::{get, post, put};
 use axum::{Json, Router};
-use james_db::library::LibraryTrack;
+use james_db::library::{CustomNames, LibraryTrack};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use tokio::io::AsyncWriteExt;
@@ -17,6 +17,7 @@ pub fn routes() -> Router<AppState> {
     Router::new()
         .route("/library", get(search))
         .route("/library/scan", post(scan))
+        .route("/library/{id}/names", put(rename).delete(reset_names))
         .route(
             "/library/upload",
             post(upload).layer(axum::extract::DefaultBodyLimit::max(super::MAX_UPLOAD)),
@@ -57,6 +58,134 @@ async fn search(
         total: state.db.count_library(&query.q).await?,
         tracks,
     }))
+}
+
+const MAX_NAME: usize = 200;
+
+/// A field that is missing (`None`), `null` (`Some(None)`) or a string.
+fn present<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<Option<String>>, D::Error> {
+    Option::<String>::deserialize(d).map(Some)
+}
+
+/// New names; a missing field (or one equal to the file's tag) follows the file's tags,
+/// `null` or `""` for artist and album means none.
+#[derive(Deserialize)]
+struct NamesBody {
+    #[serde(default)]
+    title: Option<String>,
+    #[serde(default, deserialize_with = "present")]
+    artist: Option<Option<String>>,
+    #[serde(default, deserialize_with = "present")]
+    album: Option<Option<String>>,
+}
+
+/// Invisible and direction-changing characters would let names look like other text (zero-width
+/// joiners stay: scripts and emoji need them).
+fn hidden(c: char) -> bool {
+    c.is_control()
+        || matches!(
+            c,
+            '\u{00AD}'
+                | '\u{034F}'
+                | '\u{061C}'
+                | '\u{180B}'..='\u{180F}'
+                | '\u{200B}'
+                | '\u{200E}'..='\u{200F}'
+                | '\u{2028}'..='\u{202E}'
+                | '\u{2060}'..='\u{206F}'
+                | '\u{FE00}'..='\u{FE0F}'
+                | '\u{FEFF}'
+                | '\u{1D173}'..='\u{1D17A}'
+                | '\u{E0000}'..='\u{E0FFF}'
+        )
+}
+
+/// Characters that show as empty space.
+fn blank(c: char) -> bool {
+    c.is_whitespace() || matches!(c, '\u{115F}' | '\u{1160}' | '\u{2800}' | '\u{3164}' | '\u{FFA0}')
+}
+
+/// Trimmed, without hidden characters; `""` if nothing visible is left.
+fn clean_name(value: &str, field: &str) -> ApiResult<String> {
+    let clean: String = value.chars().filter(|c| !hidden(*c)).collect();
+    let clean = clean.trim_matches(blank);
+    if clean.chars().count() > MAX_NAME {
+        return Err(ApiError::bad_request(format!(
+            "{field} is longer than {MAX_NAME} characters"
+        )));
+    }
+    Ok(clean.to_owned())
+}
+
+/// The value to store for an optional field: `None` keeps the file's tag (also when the value is
+/// the tag, which is not cleaned or checked then).
+fn custom_field(value: Option<Option<String>>, tag: Option<&str>, field: &str) -> ApiResult<Option<String>> {
+    let Some(value) = value else {
+        return Ok(None);
+    };
+    let value = value.as_deref().unwrap_or_default();
+    if value.trim() == tag.unwrap_or_default().trim() {
+        return Ok(None);
+    }
+    let clean = clean_name(value, field)?;
+    Ok((clean != tag.unwrap_or_default()).then_some(clean))
+}
+
+/// Sets the names shown and played for a track (the file is not changed).
+async fn rename(
+    State(state): State<AppState>,
+    auth: Auth,
+    Path(id): Path<i64>,
+    Json(body): Json<NamesBody>,
+) -> ApiResult<Json<LibraryTrack>> {
+    auth.require("library.manage", None)?;
+    let current = state
+        .db
+        .library_track(id)
+        .await?
+        .ok_or_else(|| ApiError::not_found("track"))?;
+    let title = custom_field(body.title.map(Some), Some(&current.tags.title), "title")?;
+    if title.as_deref() == Some("") {
+        return Err(ApiError::bad_request("the title must not be empty"));
+    }
+    let names = CustomNames {
+        title,
+        artist: custom_field(body.artist, current.tags.artist.as_deref(), "artist")?,
+        album: custom_field(body.album, current.tags.album.as_deref(), "album")?,
+    };
+    store_names(&state, &auth, id, &names).await
+}
+
+/// Back to the names from the file's tags.
+async fn reset_names(
+    State(state): State<AppState>,
+    auth: Auth,
+    Path(id): Path<i64>,
+) -> ApiResult<Json<LibraryTrack>> {
+    auth.require("library.manage", None)?;
+    store_names(&state, &auth, id, &CustomNames::default()).await
+}
+
+async fn store_names(
+    state: &AppState,
+    auth: &Auth,
+    id: i64,
+    names: &CustomNames,
+) -> ApiResult<Json<LibraryTrack>> {
+    let track = state
+        .db
+        .rename_library_track(id, names)
+        .await?
+        .ok_or_else(|| ApiError::not_found("track"))?;
+    tracing::info!(
+        user = %auth.user.username,
+        track = id,
+        title = ?names.title,
+        artist = ?names.artist,
+        album = ?names.album,
+        "library track renamed"
+    );
+    Ok(Json(track))
 }
 
 /// Starts a rescan in the background (a large library takes long); `202 Accepted`.
@@ -189,7 +318,35 @@ async fn store_field(
 
 #[cfg(test)]
 mod tests {
-    use super::sanitize_file_name;
+    use super::{clean_name, custom_field, sanitize_file_name};
+
+    #[test]
+    fn names() {
+        assert_eq!(clean_name(" a\u{202E}b\u{200B}c\n ", "t").unwrap(), "abc");
+        assert_eq!(
+            clean_name("\u{3164} \u{061C}\u{E0041}\u{FE0F}\u{2800}", "t").unwrap(),
+            ""
+        );
+        assert_eq!(clean_name("a\u{3164}b", "t").unwrap(), "a\u{3164}b");
+        assert_eq!(clean_name(&"ä".repeat(200), "t").unwrap().chars().count(), 200);
+        assert!(clean_name(&"ä".repeat(201), "t").is_err());
+        let field =
+            |v: Option<Option<&str>>, tag| custom_field(v.map(|v| v.map(String::from)), tag, "f").unwrap();
+        assert_eq!(field(None, Some("Ann")), None, "missing: the file's tag");
+        assert_eq!(field(Some(Some("Ann ")), Some("Ann")), None, "same as the tag");
+        assert_eq!(field(Some(None), Some("Ann")).as_deref(), Some(""), "null: none");
+        assert_eq!(field(Some(Some(" ")), Some("Ann")).as_deref(), Some(""));
+        assert_eq!(field(Some(Some("")), None), None, "no tag, none wanted");
+        assert_eq!(field(Some(Some("Bob")), None).as_deref(), Some("Bob"));
+        let long = "x".repeat(300);
+        assert_eq!(
+            field(Some(Some(&long)), Some(&long)),
+            None,
+            "an unchanged tag is not checked"
+        );
+        assert_eq!(field(Some(Some("a\u{200D}b")), Some("a\u{200D}b")), None);
+        assert_eq!(clean_name("👩\u{200D}💻", "t").unwrap(), "👩\u{200D}💻");
+    }
 
     #[test]
     fn file_names() {

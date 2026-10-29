@@ -216,6 +216,16 @@ export interface LibraryTrack {
   size: number;
   mtime: number;
   addedAt: number;
+  /** The names were edited in James (the file is unchanged). */
+  edited: boolean;
+  /** Names from the file's tags. */
+  tags: TrackNames;
+}
+
+export interface TrackNames {
+  title: string;
+  artist: string | null;
+  album: string | null;
 }
 
 export interface Playlist {

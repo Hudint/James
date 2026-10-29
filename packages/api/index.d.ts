@@ -1044,7 +1044,7 @@ export interface LibraryTrack {
   id: number;
   /** File path (playable with {@link Player.play}). */
   path: string;
-  /** Title from the tags, or the file name. */
+  /** Title as renamed in James, else from the tags, or the file name. */
   title: string;
   /** Artist; `null` if unknown. */
   artist: string | null;
@@ -1058,6 +1058,10 @@ export interface LibraryTrack {
   mtime: number;
   /** When the file was added to the library, Unix seconds. */
   addedAt: number;
+  /** Renamed in the web interface (title, artist and album above are the new names). */
+  edited: boolean;
+  /** Names from the file's tags (the title falls back to the file name). */
+  tags: { title: string; artist: string | null; album: string | null };
 }
 
 /** The local music library. */

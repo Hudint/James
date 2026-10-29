@@ -20,9 +20,24 @@ pub const MAX_DIRECTORY_TRACKS: usize = 1000;
 /// Files probed in parallel while resolving a directory (also bounded by the global tool limit).
 const PROBE_CONCURRENCY: usize = 8;
 
+/// Names set for a file in the library, which win over its tags.
+#[derive(Debug, Clone, PartialEq)]
+pub struct FileNames {
+    pub title: String,
+    pub artist: Option<String>,
+    pub album: Option<String>,
+}
+
+#[async_trait]
+pub trait LocalNames: Send + Sync {
+    /// Names set for the file at the canonical `path`.
+    async fn names(&self, path: &Path) -> Option<FileNames>;
+}
+
 pub struct LocalResolver {
     roots: Arc<Vec<PathBuf>>,
     ffprobe: String,
+    names: Option<Arc<dyn LocalNames>>,
 }
 
 impl LocalResolver {
@@ -33,7 +48,13 @@ impl LocalResolver {
         Self {
             roots: Arc::new(roots),
             ffprobe: ffprobe.into(),
+            names: None,
         }
+    }
+
+    pub fn with_names(mut self, names: Arc<dyn LocalNames>) -> Self {
+        self.names = Some(names);
+        self
     }
 
     /// Resolves the input to a canonical path inside a media root. Canonicalising
@@ -62,7 +83,15 @@ impl LocalResolver {
     }
 
     pub async fn track_for(&self, path: &Path) -> anyhow::Result<Track> {
-        track_for(&self.ffprobe, path).await
+        let mut track = track_for(&self.ffprobe, path).await?;
+        if let Some(names) = &self.names {
+            if let Some(names) = names.names(path).await {
+                track.title = names.title;
+                track.artist = names.artist;
+                track.album = names.album;
+            }
+        }
+        Ok(track)
     }
 }
 
@@ -134,10 +163,9 @@ impl SourceResolver for LocalResolver {
         }
         let dir = path.clone();
         let files = tokio::task::spawn_blocking(move || walk(&dir, MAX_DIRECTORY_TRACKS)).await?;
-        let ffprobe = self.ffprobe.as_str();
         let tracks: Vec<Track> = futures::stream::iter(files)
             .map(|file| async move {
-                let result = track_for(ffprobe, &file).await;
+                let result = self.track_for(&file).await;
                 if let Err(e) = &result {
                     tracing::debug!(file = %file.display(), error = %e, "skipping file");
                 }
@@ -219,6 +247,48 @@ mod tests {
             thumbnail: None,
             is_stream: false,
         }
+    }
+
+    struct Renamed(PathBuf);
+
+    #[async_trait]
+    impl LocalNames for Renamed {
+        async fn names(&self, path: &Path) -> Option<FileNames> {
+            (path == self.0).then(|| FileNames {
+                title: "Renamed".into(),
+                artist: None,
+                album: Some("Live".into()),
+            })
+        }
+    }
+
+    /// Names are looked up by the canonical path (as the library scanner stores it), also
+    /// when the media directory is reached through a symlink; the locator stays the file.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn library_names_win_over_tags() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("real/album/01.flac");
+        make_file(&file, "First");
+        make_file(&dir.path().join("real/album/02.flac"), "Second");
+        std::os::unix::fs::symlink(dir.path().join("real"), dir.path().join("link")).unwrap();
+        let file = file.canonicalize().unwrap();
+        let resolver = LocalResolver::new(vec![dir.path().join("link")], "ffprobe")
+            .with_names(Arc::new(Renamed(file.clone())));
+
+        let single = resolver.resolve("local:album/01.flac").await.unwrap();
+        assert_eq!(
+            (
+                single[0].title.as_str(),
+                single[0].artist.as_deref(),
+                single[0].album.as_deref()
+            ),
+            ("Renamed", None, Some("Live"))
+        );
+        assert_eq!(Path::new(&single[0].locator), file);
+        let all = resolver.resolve("local:album").await.unwrap();
+        let titles: Vec<_> = all.iter().map(|t| t.title.as_str()).collect();
+        assert_eq!(titles, ["Renamed", "Second"]);
     }
 
     #[tokio::test]

@@ -642,6 +642,92 @@ async fn uploads_are_sanitised() {
 }
 
 #[tokio::test]
+async fn library_tracks_are_renamed() {
+    let api = Api::new().await;
+    api.db
+        .upsert_library_track(&james_db::library::LibraryEntry {
+            path: "/m/a.mp3".into(),
+            title: "Track 01".into(),
+            artist: Some("Ann".into()),
+            album: None,
+            duration_ms: None,
+            size: 1,
+            mtime: 1,
+        })
+        .await
+        .unwrap();
+    let id = api.db.search_library("", 1, 0).await.unwrap()[0].id;
+    let (_, reader) = api
+        .user_with_grants("reader", &[Grant::global("library.read")])
+        .await;
+    let (_, manager) = api
+        .user_with_grants("manager", &[Grant::global("library.manage")])
+        .await;
+    let path = format!("/library/{id}/names");
+    let names = json!({"title": "Intro", "artist": "Ann", "album": null});
+    for (auth, status) in [
+        (None, StatusCode::UNAUTHORIZED),
+        (Some(&reader), StatusCode::FORBIDDEN),
+    ] {
+        let auth = auth.map(String::as_str);
+        assert_eq!(
+            api.call(Method::PUT, &path, auth, Some(names.clone()))
+                .await
+                .status,
+            status
+        );
+        assert_eq!(api.call(Method::DELETE, &path, auth, None).await.status, status);
+    }
+    assert_eq!(
+        api.call(
+            Method::PUT,
+            "/library/999/names",
+            Some(&manager),
+            Some(names.clone())
+        )
+        .await
+        .status,
+        StatusCode::NOT_FOUND
+    );
+    assert_eq!(
+        api.call(
+            Method::PUT,
+            &path,
+            Some(&manager),
+            Some(json!({"title": " \u{200B} "}))
+        )
+        .await
+        .status,
+        StatusCode::BAD_REQUEST,
+        "empty title"
+    );
+
+    let r = api.call(Method::PUT, &path, Some(&manager), Some(names)).await;
+    assert_eq!(r.status, StatusCode::OK, "{}", r.body);
+    assert_eq!(r.body["title"], "Intro");
+    assert_eq!(r.body["artist"], "Ann", "unchanged artist follows the file");
+    assert_eq!(r.body["edited"], true);
+    assert_eq!(r.body["tags"]["title"], "Track 01");
+    let r = api
+        .call(
+            Method::PUT,
+            &path,
+            Some(&manager),
+            Some(json!({"title": "Track 01", "artist": null})),
+        )
+        .await;
+    assert_eq!(
+        (r.body["title"].as_str(), r.body["artist"].as_str()),
+        (Some("Track 01"), None)
+    );
+    let r = api.call(Method::DELETE, &path, Some(&manager), None).await;
+    assert_eq!(
+        (r.body["edited"].as_bool(), r.body["artist"].as_str()),
+        (Some(false), Some("Ann"))
+    );
+}
+
+#[tokio::test]
 async fn websocket_filters_by_instance_and_closes_on_revocation() {
     let api = Api::new().await;
     let (user_id, session) = api

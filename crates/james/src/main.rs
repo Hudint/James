@@ -77,10 +77,10 @@ async fn run(args: Args, config: Config, audio: tokio::runtime::Handle) -> anyho
     let mut sources = SourceRegistry::default();
     sources.register(
         0,
-        Arc::new(LocalResolver::new(
-            media_dirs.clone(),
-            config.tools.ffprobe.clone(),
-        )),
+        Arc::new(
+            LocalResolver::new(media_dirs.clone(), config.tools.ffprobe.clone())
+                .with_names(Arc::new(integration::LibraryNames(db.clone()))),
+        ),
     );
     // Every outbound media connection goes through the egress proxy (SSRF protection).
     // The PO token provider sidecar usually lives on a private address.

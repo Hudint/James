@@ -111,16 +111,28 @@ fn filter_cookies(content: &str) -> Result<(String, usize, usize), String> {
             None if raw.trim().is_empty() || raw.starts_with('#') => continue,
             None => raw,
         };
-        let fields: Vec<&str> = line.split('\t').collect();
+        let mut fields: Vec<&str> = line.split('\t').collect();
         let flag = |f: &str| f == "TRUE" || f == "FALSE";
-        if fields.len() != 7
-            || !flag(fields[1])
-            || !flag(fields[3])
-            || fields[4].is_empty()
-            || !fields[4].bytes().all(|b| b.is_ascii_digit())
-        {
+        let digits = |f: &str| !f.is_empty() && f.bytes().all(|b| b.is_ascii_digit());
+        // Some exporters write the expiry with fractions of a second, which yt-dlp rejects.
+        let expiry = fields.get(4).map(|f| match f.split_once('.') {
+            Some((whole, fraction)) if digits(fraction) => whole,
+            _ => f,
+        });
+        let problem = if fields.len() != 7 {
+            Some("7 tab-separated fields")
+        } else if line.contains(['\r', '\0']) {
+            Some("no carriage return or NUL inside a line")
+        } else if !flag(fields[1]) || !flag(fields[3]) {
+            Some("TRUE or FALSE in the 2nd and 4th field")
+        } else if !expiry.is_some_and(digits) {
+            Some("an expiry time in seconds in the 5th field")
+        } else {
+            None
+        };
+        if let Some(problem) = problem {
             return Err(format!(
-                "line {} is not in the Netscape cookie format (7 tab-separated fields)",
+                "line {} is not in the Netscape cookie format ({problem})",
                 number + 1
             ));
         }
@@ -128,7 +140,11 @@ fn filter_cookies(content: &str) -> Result<(String, usize, usize), String> {
         // YouTube's own session cookies; Google's would also open Drive and other services.
         if domain == "youtube.com" || domain.ends_with(".youtube.com") {
             count += 1;
-            kept.push_str(raw);
+            fields[4] = expiry.unwrap_or_default();
+            if raw.starts_with("#HttpOnly_") {
+                kept.push_str("#HttpOnly_");
+            }
+            kept.push_str(&fields.join("\t"));
             kept.push('\n');
         } else {
             dropped += 1;
@@ -183,6 +199,35 @@ mod tests {
         assert!(
             filter_cookies(".youtube.com\tTRUE\t/\tTRUE\tsoon\tSID\tabc").is_err(),
             "expiry must be a number"
+        );
+        for bad in ["1893456000.5x", "1893456000.", ".5", "1.2.3"] {
+            assert!(
+                filter_cookies(&format!(".youtube.com\tTRUE\t/\tTRUE\t{bad}\tSID\tabc"))
+                    .unwrap_err()
+                    .contains("expiry"),
+                "{bad}"
+            );
+        }
+        assert!(filter_cookies(".youtube.com\tTRUE\t/\tTRUE\t1\tSID\ta\rb").is_err());
+        assert_eq!(
+            filter_cookies("#HttpOnly_.example.com\tTRUE\t/\tTRUE\t1.5\ta\tb\n")
+                .unwrap()
+                .2,
+            1,
+            "other sites are dropped, also with a fractional expiry"
+        );
+        let (kept, count, _) = filter_cookies(
+            ".youtube.com\tTRUE\t/\tTRUE\t1893456000.123\tSID\tabc\n\
+             #HttpOnly_.youtube.com\tTRUE\t/\tTRUE\t1893456000.5\tHSID\tdef\n",
+        )
+        .unwrap();
+        assert_eq!(count, 2);
+        assert!(
+            kept.ends_with(
+                ".youtube.com\tTRUE\t/\tTRUE\t1893456000\tSID\tabc\n\
+                 #HttpOnly_.youtube.com\tTRUE\t/\tTRUE\t1893456000\tHSID\tdef\n"
+            ),
+            "expiry in whole seconds, as yt-dlp reads it"
         );
         assert_eq!(
             filter_cookies("notyoutube.com\tTRUE\t/\tTRUE\t0\ta\tb\n")

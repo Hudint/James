@@ -43,6 +43,7 @@ searching) are rate-limited per account (`429`).
 | `POST /instances/{id}/say` `{text, voice?, language?}`, `POST …/say/stop` | `tts.say` | [Text to speech](tts.md): `202 {"id"}`, then `speechStarted`/`speechEnded` events; `429` when 16 texts wait |
 | `GET /tts/voices` | account | Installed voices |
 | `GET /library?q=&limit=&offset=`, `POST /library/upload`, `POST /library/scan` | `library.read` / `library.manage` | Local library |
+| `PUT /library/{id}/names {title?, artist?, album?}`, `DELETE /library/{id}/names` | `library.manage` | Edit a track's names in James (the file is not changed, rescans keep them). A missing or `null` title, any missing field, or one equal to the file's tag follows the file; `null`/`""` for artist or album means none. `DELETE` returns to the file's tags |
 | `GET/POST /playlists`, `GET/PATCH/DELETE /playlists/{id}`, `GET/PUT/POST /playlists/{id}/tracks`, `POST /playlists/{id}/play` | `playlist.read` / `playlist.manage` | Playlists |
 | `GET/POST /users`, `GET/PATCH/DELETE /users/{id}`, `GET /users/{id}/identities` | `users.manage` | Accounts (`oidcSubject` and `isAdmin` only by administrators) |
 | `GET/POST /roles`, `PUT/DELETE /roles/{name}`, `GET/PUT /group-roles/{platform}[/{group}]` | `users.manage` | Roles and server group mapping |

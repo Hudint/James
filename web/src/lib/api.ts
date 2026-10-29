@@ -6,6 +6,7 @@ import type {
   InstanceStatus,
   InstanceSummary,
   LibraryTrack,
+  TrackNames,
   Me,
   PlayMode,
   Playlist,
@@ -193,6 +194,10 @@ export const api = {
       "GET",
       `/library?q=${enc(q)}&limit=${limit}&offset=${offset}`,
     ),
+  renameTrack: (id: number, names: TrackNames) =>
+    request<LibraryTrack>("PUT", `/library/${id}/names`, names),
+  resetTrackNames: (id: number) =>
+    request<LibraryTrack>("DELETE", `/library/${id}/names`),
   scanLibrary: () => request<void>("POST", "/library/scan"),
   upload: (files: FileList | File[]) => {
     const form = new FormData();
