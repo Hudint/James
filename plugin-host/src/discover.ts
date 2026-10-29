@@ -145,6 +145,8 @@ async function singleFile(pluginsDir: string, file: string, version: string, dea
 /** Most config fields (also nested) and nesting of a manifest. */
 const MAX_FIELDS = 300;
 const MAX_DEPTH = 4;
+/** Most entries in a list setting's default. */
+const MAX_ITEMS = 100;
 
 /** The manifest of a native plugin from its definition (package.json `james` or definePlugin()). */
 function nativeManifest(id: string, d: Record<string, any>, version: string, prefix: string): Manifest {
@@ -177,7 +179,10 @@ function checkFields(fields: unknown[], depth: number, seen: { count: number }) 
     if (++seen.count > MAX_FIELDS) throw new Error(`more than ${MAX_FIELDS} settings`);
     if (!field || typeof field !== 'object' || typeof (field as any).name !== 'string') throw new Error('every setting needs a name');
     const vars = (field as any).vars;
+    if (vars !== undefined && !Array.isArray(vars)) throw new Error(`'vars' of setting '${(field as any).name}' must be a list`);
     if (Array.isArray(vars)) checkFields(vars, depth + 1, seen);
+    const fallback = (field as any).default;
+    if (Array.isArray(fallback) && fallback.length > MAX_ITEMS) throw new Error(`the default of '${(field as any).name}' has too many entries`);
   }
 }
 

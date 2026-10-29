@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { channelTree as buildChannelTree, indent } from '$lib/channels';
   import { onMount } from 'svelte';
   import { api } from '$lib/api';
   import { i18n, t } from '$lib/i18n/index.svelte';
@@ -30,28 +31,8 @@
     config.settings = { ...config.settings, [key]: value.trim() === '' ? null : value };
   }
 
-  /** TeamSpeak spacers (`[cspacer]---`) are decoration, not channels to join. */
-  const isSpacer = (name: string) => /^\[[lcr*]?spacer[^\]]*\]/i.test(name);
-  /** Channels depth first (by their order) with depth and path (`Lobby/Music`). */
-  let channelTree = $derived.by(() => {
-    const children = new Map<string, PlatformChannel[]>();
-    for (const c of channels ?? []) {
-      const key = c.parent ?? '';
-      children.set(key, [...(children.get(key) ?? []), c]);
-    }
-    const out: { id: string; name: string; depth: number; path: string }[] = [];
-    const walk = (parent: string, depth: number, prefix: string) => {
-      for (const c of (children.get(parent) ?? []).sort((a, b) => a.order - b.order)) {
-        const path = prefix ? `${prefix}/${c.name}` : c.name;
-        // Temporary channels disappear when empty: no use as a default.
-        const temporary = c.permanent === false && c.semiPermanent === false;
-        if (!isSpacer(c.name) && !temporary) out.push({ id: c.id, name: c.name, depth, path });
-        walk(c.id, depth + 1, path);
-      }
-    };
-    walk('', 0, '');
-    return out;
-  });
+  /** Channels depth first with depth and path (`Lobby/Music`). */
+  let channelTree = $derived(buildChannelTree(channels));
   /** The configured channel (id or path) as an id of the list; `null` if not on the server. */
   let selectedChannel = $derived.by(() => {
     const value = settings.channel?.trim();
@@ -143,7 +124,7 @@
               <option value={settings.channel ?? ''}>{t('config.channelMissing', { channel: settings.channel ?? '' })}</option>
             {/if}
             {#each channelTree as channel (channel.id)}
-              <option value={channel.id}>{'\u00a0\u00a0\u00a0'.repeat(channel.depth)}{channel.name}</option>
+              <option value={channel.id}>{indent(channel.depth)}{channel.name}</option>
             {/each}
           </select>
           <span id="cfg-channel-hint" class="hint">{t('config.channelPickHint')}</span>

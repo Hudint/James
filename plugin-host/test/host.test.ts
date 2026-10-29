@@ -508,3 +508,15 @@ test('the bundled examples load', async () => {
     }
   }
 });
+
+test('defaults apply to settings and to the entries of list settings', async () => {
+  const { withDefaults } = await import('../src/worker/runtime.ts');
+  const fields = [
+    { name: 'interval', type: 'number', default: 5 },
+    { name: 'rules', type: 'array', vars: [{ name: 'active', type: 'checkbox', default: true }, { name: 'id', type: 'channel' }] },
+  ];
+  assert.deepEqual(withDefaults(fields, { rules: [{ id: '8' }, { id: '9', active: false }] }), {
+    interval: 5,
+    rules: [{ id: '8', active: true }, { id: '9', active: false }],
+  });
+});

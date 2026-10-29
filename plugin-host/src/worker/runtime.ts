@@ -352,8 +352,12 @@ export class Context {
 export function withDefaults(fields: any[] | undefined, config: Record<string, unknown>): Record<string, unknown> {
   const result: Record<string, unknown> = { ...config };
   for (const field of fields ?? []) {
-    if (field && typeof field.name === 'string' && result[field.name] === undefined && field.default !== undefined) {
-      result[field.name] = field.default;
+    if (!field || typeof field.name !== 'string') continue;
+    if (result[field.name] === undefined && field.default !== undefined) result[field.name] = field.default;
+    // Entries of a list get their fields' defaults too.
+    const items = result[field.name];
+    if (field.type === 'array' && Array.isArray(field.vars) && Array.isArray(items)) {
+      result[field.name] = items.map((item) => (item && typeof item === 'object' && !Array.isArray(item) ? withDefaults(field.vars, item as Record<string, unknown>) : item));
     }
   }
   return result;

@@ -7,7 +7,7 @@
   import { confirmAction } from '$lib/confirm.svelte';
   import { i18n, locales, t } from '$lib/i18n/index.svelte';
   import { reportError, toast } from '$lib/session.svelte';
-  import type { InstanceSummary, PluginInfo, PluginOverview, PluginPermission } from '$lib/types';
+  import type { InstanceSummary, PlatformChannel, PluginInfo, PluginOverview, PluginPermission } from '$lib/types';
 
   /** Status refresh while the page is open (crashes, instances starting). */
   const POLL_MS = 10_000;
@@ -38,6 +38,25 @@
   let values = $state<Record<string, unknown>>({});
   let formValid = $state(true);
   let saving = $state(false);
+  /** Channels of the selected instance while it is connected (for `channel` settings). */
+  let channels = $state<PlatformChannel[] | null>(null);
+  let channelRequest = 0;
+  async function loadChannels() {
+    const request = ++channelRequest;
+    const instance = selected;
+    // Not the previous instance's channels meanwhile.
+    channels = null;
+    const loaded = instance ? await api.server(instance).then((s) => s.channels, () => null) : null;
+    // Only the latest answer counts (the instance may have changed meanwhile).
+    if (request === channelRequest) channels = loaded;
+  }
+  /** Updates the channel list without clearing it first (no flicker). */
+  async function refreshChannels() {
+    const request = ++channelRequest;
+    // A failed poll keeps the list (the controls do not flip while someone edits).
+    const loaded = selected ? await api.server(selected).then((s) => s.channels, () => undefined) : null;
+    if (request === channelRequest && loaded !== undefined) channels = loaded;
+  }
   const dirty = $derived(configuring !== null && JSON.stringify(values) !== JSON.stringify(configs[selected] ?? {}));
 
   async function load() {
@@ -75,6 +94,8 @@
     void load();
     timer = setInterval(() => {
       if (!document.hidden && !dialog?.open) void load();
+      // The instance may have connected or disconnected meanwhile.
+      if (!document.hidden && configuring) void refreshChannels();
     }, POLL_MS);
   });
   onDestroy(() => clearInterval(timer));
@@ -115,7 +136,10 @@
     } catch {
       // Only a convenience.
     }
-    if (configuring) values = { ...(configs[id] ?? {}) };
+    if (configuring) {
+      values = { ...(configs[id] ?? {}) };
+      void loadChannels();
+    }
     formValid = true;
   }
 
@@ -306,6 +330,7 @@
       configuring = plugin.manifest.id;
       values = { ...(configs[selected] ?? {}) };
       formValid = true;
+      void loadChannels();
     } catch (e) {
       reportError(e);
     }
@@ -598,7 +623,7 @@
           <h3 class="label">{t('plugins.settingsFor', { instance: instanceName(selected) })}</h3>
           {#if !here}<p class="small muted">{t('plugins.settingsInactive')}</p>{/if}
           {#key selected}
-            <PluginConfigForm fields={m.config} bind:values bind:valid={formValid} idPrefix="cfg-{m.id}" />
+            <PluginConfigForm fields={m.config} bind:values bind:valid={formValid} idPrefix="cfg-{m.id}" {channels} />
           {/key}
           <div class="row">
             <button class="btn btn-primary" type="submit" disabled={saving || !selected || !formValid || !dirty}>
@@ -737,6 +762,15 @@
     font: inherit;
     text-decoration: underline;
     cursor: pointer;
+  }
+  /* Long forms: Save stays in reach. */
+  .settings > .row:last-child {
+    position: sticky;
+    bottom: 0;
+    background: var(--surface);
+    padding: var(--space-3) 0;
+    border-top: 1px solid var(--border);
+    z-index: 1;
   }
   .settings h3 {
     margin: 0;
