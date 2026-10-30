@@ -139,7 +139,8 @@ Each config field has a `name` (the key in `bot.config`), a `title` and a `type`
 | `select` | dropdown of `options` | index of the selected option |
 | `strings` | one entry per line | string[] |
 | `channel` | channel id | string |
-| `track`, `tracks` | track reference | string |
+| `track` | URL, or a track chosen from the library (stored as `library:<id>`; moving or renaming the file gives it a new id, so the setting must be chosen again) | string, playable with `bot.player.play` |
+| `tracks` | one track reference (URL, `library:<id>`, path) per line | string |
 | `array` | list of objects with the sub-fields in `vars` | object[] |
 
 `default` is applied when no value is set, `placeholder` and `indent` affect the form, and
@@ -324,6 +325,7 @@ bot.player.status;     // { current, paused, volume, repeat, shuffle, positionMs
 bot.player.queue;      // QueueItem[]
 await bot.player.play('https://www.youtube.com/watch?v=…');  // append (default)
 await bot.player.play('yt: lofi beats', 'now');               // replace the current track
+await bot.player.play('library:42');                          // a library track (e.g. a `track` setting)
 const [first] = await bot.player.search('daft punk');
 await bot.player.play(first, 'next');
 await bot.player.skip(); await bot.player.previous(); await bot.player.stop();

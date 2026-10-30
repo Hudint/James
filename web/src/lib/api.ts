@@ -197,6 +197,7 @@ export const api = {
       "GET",
       `/library?q=${enc(q)}&limit=${limit}&offset=${offset}`,
     ),
+  libraryTrack: (id: number) => request<LibraryTrack>("GET", `/library/${id}`),
   renameTrack: (id: number, names: TrackNames) =>
     request<LibraryTrack>("PUT", `/library/${id}/names`, names),
   resetTrackNames: (id: number) =>

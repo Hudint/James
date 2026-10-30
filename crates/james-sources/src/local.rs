@@ -6,7 +6,7 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use anyhow::{anyhow, bail};
+use anyhow::{anyhow, bail, Context};
 use async_trait::async_trait;
 use futures::StreamExt;
 use james_core::source::{strip_scheme, MediaInput, SourceResolver, Track};
@@ -29,15 +29,20 @@ pub struct FileNames {
 }
 
 #[async_trait]
-pub trait LocalNames: Send + Sync {
+/// The library index (the database): names edited for files, and files by library id.
+pub trait LibraryIndex: Send + Sync {
     /// Names set for the file at the canonical `path`.
     async fn names(&self, path: &Path) -> Option<FileNames>;
+    /// The file of library track `id` (for `library:<id>` inputs); `None` if there is none.
+    async fn path(&self, _id: i64) -> anyhow::Result<Option<PathBuf>> {
+        Ok(None)
+    }
 }
 
 pub struct LocalResolver {
     roots: Arc<Vec<PathBuf>>,
     ffprobe: String,
-    names: Option<Arc<dyn LocalNames>>,
+    names: Option<Arc<dyn LibraryIndex>>,
 }
 
 impl LocalResolver {
@@ -52,7 +57,7 @@ impl LocalResolver {
         }
     }
 
-    pub fn with_names(mut self, names: Arc<dyn LocalNames>) -> Self {
+    pub fn with_names(mut self, names: Arc<dyn LibraryIndex>) -> Self {
         self.names = Some(names);
         self
     }
@@ -153,10 +158,32 @@ impl SourceResolver for LocalResolver {
     /// Cheap syntactic check; the path itself is validated in `resolve`.
     fn accepts(&self, input: &str) -> bool {
         strip_scheme(input, "local").is_some()
+            // Any `library:` input is ours (a malformed one is an error, never a web search).
+            || strip_scheme(input, "library").is_some()
             || (input.starts_with('/') && self.roots.iter().any(|r| Path::new(input).starts_with(r)))
     }
 
     async fn resolve(&self, input: &str) -> anyhow::Result<Vec<Track>> {
+        if let Some(id) = strip_scheme(input, "library") {
+            let id: i64 = id
+                .trim()
+                .parse()
+                .ok()
+                .filter(|id| *id > 0)
+                .ok_or_else(|| anyhow!("'{input}' is not a library track (library:<number>)"))?;
+            let file = match &self.names {
+                Some(names) => names.path(id).await.context("cannot read the library")?,
+                None => None,
+            }
+            .ok_or_else(|| anyhow!("there is no track {id} in the library"))?;
+            // Checked like any other path (it must be inside a media directory); the reason
+            // (with the server's path) is not shown to whoever asked.
+            let path = self.locate_async(&file.to_string_lossy()).await.map_err(|e| {
+                tracing::debug!(id, error = %e, "library track not playable");
+                anyhow!("library track {id} is not available")
+            })?;
+            return Ok(vec![self.track_for(&path).await?]);
+        }
         let path = self.locate_async(input).await?;
         if !path.is_dir() {
             return Ok(vec![self.track_for(&path).await?]);
@@ -252,12 +279,21 @@ mod tests {
     struct Renamed(PathBuf);
 
     #[async_trait]
-    impl LocalNames for Renamed {
+    impl LibraryIndex for Renamed {
         async fn names(&self, path: &Path) -> Option<FileNames> {
             (path == self.0).then(|| FileNames {
                 title: "Renamed".into(),
                 artist: None,
                 album: Some("Live".into()),
+            })
+        }
+
+        async fn path(&self, id: i64) -> anyhow::Result<Option<PathBuf>> {
+            Ok(match id {
+                7 => Some(self.0.clone()),
+                // A row left from a media folder that is no longer configured.
+                9 => Some(PathBuf::from("/etc/passwd")),
+                _ => None,
             })
         }
     }
@@ -286,6 +322,23 @@ mod tests {
             ("Renamed", None, Some("Live"))
         );
         assert_eq!(Path::new(&single[0].locator), file);
+        let by_id = resolver.resolve("library:7").await.unwrap();
+        assert_eq!(by_id[0].title, "Renamed");
+        assert!(resolver.accepts("library:7") && resolver.accepts("Library:7"));
+        for bad in [
+            "library:8",
+            "library:x",
+            "library:0",
+            "library:-1",
+            "library:99999999999999999999",
+        ] {
+            assert!(resolver.accepts(bad), "{bad} is ours, not a web search");
+            assert!(resolver.resolve(bad).await.is_err(), "{bad}");
+        }
+        assert!(
+            resolver.resolve("library:9").await.is_err(),
+            "outside the media folders"
+        );
         let all = resolver.resolve("local:album").await.unwrap();
         let titles: Vec<_> = all.iter().map(|t| t.title.as_str()).collect();
         assert_eq!(titles, ["Renamed", "Second"]);

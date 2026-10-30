@@ -667,6 +667,27 @@ async fn library_tracks_are_renamed() {
     let (_, manager) = api
         .user_with_grants("manager", &[Grant::global("library.manage")])
         .await;
+    assert_eq!(
+        api.call(Method::GET, &format!("/library/{id}"), Some(&reader), None)
+            .await
+            .body["title"],
+        "Track 01"
+    );
+    assert_eq!(
+        api.call(Method::GET, "/library/999", Some(&reader), None)
+            .await
+            .status,
+        StatusCode::NOT_FOUND
+    );
+    let (_, player) = api
+        .user_with_grants("player", &[Grant::global("playback.play")])
+        .await;
+    assert_eq!(
+        api.call(Method::GET, &format!("/library/{id}"), Some(&player), None)
+            .await
+            .status,
+        StatusCode::FORBIDDEN
+    );
     let path = format!("/library/{id}/names");
     let names = json!({"title": "Intro", "artist": "Ann", "album": null});
     for (auth, status) in [

@@ -52,8 +52,10 @@ can be changed per instance. Plugins add more commands; `!help` lists the ones a
 | `!link <code>` | | Links your TeamSpeak identity to your web account (private message) | – |
 
 Inputs: a URL (YouTube, SoundCloud, Bandcamp, radio streams, … – everything yt-dlp supports, or a
-direct stream), `yt: <search>` (or plain text, which searches YouTube), or a file path from the
-library.
+direct stream), `yt: <search>` (or plain text, which searches YouTube), a file path from the
+library (`local:<path>` relative to a media folder), or `library:<id>` for a library track (what
+plugin settings store when a song is chosen from the library). Library files can be played by
+everyone allowed to play; `library.read` only guards browsing the library.
 
 ### Voice commands
 

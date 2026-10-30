@@ -504,12 +504,14 @@ function modules(ctx: Context, bot: Bot, rt: Runtime, scriptModule: { exports: u
   const media = {
     playURL: (url: string) => starting(ctx, 'playURL', bot.player.play(String(url), 'now'), String(url)),
     getCurrentTrack: () => currentTrack(),
-    // A library id, a URL (YouTube, SoundCloud, a stream, …) or a local file's id (`local:<path>`).
+    // A library id (`5` or `library:5`), a URL (YouTube, SoundCloud, a stream, …) or a local file's
+    // id (`local:<path>`).
     // SinusBot's own ids do not exist in James: settings holding them need a URL instead.
     getTrackByID: (id: string) => {
       const value = String(id ?? '').trim();
-      if (/^\d+$/.test(value)) {
-        return tryOr(ctx, 'getTrackByID', () => sTrack(ctx, bot, libraryTrack(ctx.callSync('library.get', { id: Number(value) }))), undefined);
+      const library = /^(?:library:)?(\d+)$/i.exec(value);
+      if (library) {
+        return tryOr(ctx, 'getTrackByID', () => sTrack(ctx, bot, libraryTrack(ctx.callSync('library.get', { id: Number(library[1]) }))), undefined);
       }
       if (isUrl(value)) return sTrack(ctx, bot, { source: 'url', locator: value, title: value, input: value });
       // Local files (other sources use URLs as ids).

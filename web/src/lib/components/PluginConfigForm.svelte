@@ -5,6 +5,8 @@
   import { t } from '$lib/i18n/index.svelte';
   import type { ConfigField, PlatformChannel } from '$lib/types';
   import Icon from './Icon.svelte';
+  import TrackPicker from './TrackPicker.svelte';
+  import { trackTitles } from '$lib/trackTitles.svelte';
   import PluginConfigForm from './PluginConfigForm.svelte';
 
   let {
@@ -77,6 +79,9 @@
       const value = item[v.name];
       if (value === undefined || value === null || value === '') continue;
       if (v.type === 'channel') return tree.find((c) => c.id === String(value))?.name ?? String(value);
+      if (v.type === 'track' && /^library:[1-9]\d*$/i.test(String(value))) {
+        return trackTitles[String(value).slice(8)] ?? t('plugins.track.libraryItem', { id: String(value).slice(8) });
+      }
       if (v.type === 'string' || v.type === 'track') return String(value).slice(0, 60);
     }
     return '';
@@ -204,7 +209,7 @@
           {#if field.type === 'array' && Array.isArray(field.vars) && field.vars.length && items(field)}
             <span class="label" id="{id}-label">{field.title ?? field.name}</span>
           {:else}
-            <label for={id}>{field.title ?? field.name}</label>
+            <label for={id} id="{id}-label">{field.title ?? field.name}</label>
           {/if}
           {#if field.type === 'multiline'}
             <textarea {id} placeholder={field.placeholder} value={String(value(field))} oninput={(e) => set(field, e.currentTarget.value)}></textarea>
@@ -270,10 +275,12 @@
               {t('plugins.arrayHint', { fields: (field.vars ?? []).map((v) => v.name).join(', ') })}
             </span>
             {#if invalid[field.name]}<span class="error-text" id="{id}-error">{t('plugins.invalidJson')}</span>{/if}
+          {:else if field.type === 'track'}
+            <TrackPicker {id} placeholder={field.placeholder} value={String(value(field) ?? '')} onchange={(v) => set(field, v)} />
           {:else}
             <input {id} type="text" placeholder={field.placeholder} value={String(value(field))} oninput={(e) => set(field, e.currentTarget.value)} />
             {#if field.type === 'channel'}<span class="hint">{t('plugins.channelOffline')}</span>{/if}
-            {#if field.type === 'track' || field.type === 'tracks'}<span class="hint">{t('plugins.trackHint')}</span>{/if}
+            {#if field.type === 'tracks'}<span class="hint">{t('plugins.trackHint')}</span>{/if}
           {/if}
         {/if}
       </div>

@@ -17,6 +17,7 @@ pub fn routes() -> Router<AppState> {
     Router::new()
         .route("/library", get(search))
         .route("/library/scan", post(scan))
+        .route("/library/{id}", get(one))
         .route("/library/{id}/names", put(rename).delete(reset_names))
         .route(
             "/library/upload",
@@ -186,6 +187,20 @@ async fn store_names(
         "library track renamed"
     );
     Ok(Json(track))
+}
+
+async fn one(
+    State(state): State<AppState>,
+    auth: Auth,
+    Path(id): Path<i64>,
+) -> ApiResult<Json<LibraryTrack>> {
+    auth.require("library.read", None)?;
+    state
+        .db
+        .library_track(id)
+        .await?
+        .map(Json)
+        .ok_or_else(|| ApiError::not_found("track"))
 }
 
 /// Starts a rescan in the background (a large library takes long); `202 Accepted`.

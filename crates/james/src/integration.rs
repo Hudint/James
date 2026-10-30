@@ -40,7 +40,7 @@ impl InstanceStore for DbStore {
 pub struct LibraryNames(pub Db);
 
 #[async_trait]
-impl james_sources::local::LocalNames for LibraryNames {
+impl james_sources::local::LibraryIndex for LibraryNames {
     async fn names(&self, path: &std::path::Path) -> Option<james_sources::local::FileNames> {
         let names = self
             .0
@@ -53,6 +53,10 @@ impl james_sources::local::LocalNames for LibraryNames {
             artist: names.artist,
             album: names.album,
         })
+    }
+
+    async fn path(&self, id: i64) -> anyhow::Result<Option<std::path::PathBuf>> {
+        Ok(self.0.library_track(id).await?.map(|track| track.path.into()))
     }
 }
 
