@@ -17,6 +17,11 @@
   artist and album (pencil button). The file is not changed and a rescan keeps the edits; fields
   left as in the file follow the file's tags. Tracks already in a queue or playlist keep the name they
   had when they were added, and edits are lost when the file is moved or renamed on disk.
+  **Save from the web** (and **Save to library** on the playing track, in search results and in
+  *Add music*) stores the audio of a YouTube video (or a SoundCloud, Bandcamp, … track) as a file
+  in `media/downloads`, without re-encoding and with title and artist as tags; it then plays
+  without the internet and stays when the video disappears. Saving the same video again returns
+  the existing file. Live streams, playlists and tracks over the configured limits are refused.
 - **Playlists** – saved lists; play them on any instance.
 - **Plugins** – for the instance chosen in the toolbar: search and filter (all, active, available,
   problems), switch plugins on and off, and open any number of them at once to see their details,
@@ -42,6 +47,8 @@ can be changed per instance. Plugins add more commands; `!help` lists the ones a
 | `!play <url\|search\|path>` | `p` | Plays immediately | `playback.play` |
 | `!add <…>` | `a`, `enqueue` | Adds to the end of the queue | `playback.play` |
 | `!playnext <…>` | `pn` | Plays after the current track | `playback.play` |
+| `!yt <url\|search>` | `youtube` | Plays a YouTube video (text always searches YouTube) | `playback.play` |
+| `!ytdl <url\|search>` | `save` | Saves the track (YouTube, SoundCloud, …) to the library and plays it from there (playing needs `playback.play`) | `library.download` |
 | `!skip` | `next`, `n`, `s` | Next track | `playback.control` |
 | `!prev` | `previous`, `back` | Previous track | `playback.control` |
 | `!stop`, `!pause`, `!resume` | `continue`, `unpause` | Stop / pause / resume | `playback.control` |
@@ -111,6 +118,7 @@ Linked identities → Link identity** and send the shown `!link` code to the bot
 | `instance.speech` | Switch speech recognition of an instance on or off and change its settings (also granted by `instance.*`) |
 | `instance.logs` | Read an instance's log (may contain chat commands and client names; also granted by `instance.*`) |
 | `library.read`, `library.manage` | Browse / upload, rename and rescan the library |
+| `library.download` | Save YouTube (and other yt-dlp) tracks to the library (`!ytdl`, web interface); uses disk space and bandwidth, so grant it to trusted roles only |
 | `playlist.read`, `playlist.manage` | See / edit playlists |
 | `plugins.use`, `plugins.manage` | Use plugin pages / install and configure plugins |
 | `users.manage` | Manage users and roles |

@@ -83,6 +83,14 @@ pub fn register(registry: &CommandRegistry) {
             handler: play,
         },
         Builtin {
+            name: "yt",
+            aliases: &["youtube"],
+            usage: "<url|search>",
+            description: "Plays a YouTube video (link or search) immediately",
+            permission: Some(PLAY),
+            handler: youtube,
+        },
+        Builtin {
             name: "add",
             aliases: &["a", "enqueue"],
             usage: "<url|search|path>",
@@ -342,6 +350,16 @@ fn play_with<'a>(ctx: &'a CommandContext, mode: PlayMode, verb: &'static str) ->
 
 fn play(ctx: &CommandContext) -> Output<'_> {
     play_with(ctx, PlayMode::Now, "Playing")
+}
+
+/// Like `play`, but text is always a YouTube search (never a library file or another source).
+fn youtube(ctx: &CommandContext) -> Output<'_> {
+    Box::pin(async move {
+        let input = require_args(ctx)?;
+        let input = james_core::source::youtube_input(input);
+        let items = ctx.instance.play(&input, PlayMode::Now, requester(ctx)).await?;
+        Ok(Some(added_message(&items, "Playing")))
+    })
 }
 
 fn add(ctx: &CommandContext) -> Output<'_> {

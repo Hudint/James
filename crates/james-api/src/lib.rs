@@ -33,6 +33,10 @@ pub trait LibraryService: Send + Sync {
     async fn index(&self, files: Vec<PathBuf>) -> anyhow::Result<()>;
     /// Directory uploads are stored in.
     fn upload_dir(&self) -> PathBuf;
+    /// Saves what `input` (a URL or search) resolves to as a file in the library, e.g. a
+    /// YouTube video's audio; returns its library entry (the existing one if it was saved
+    /// before). `owner` (e.g. `user:1`) can save one track at a time.
+    async fn save(&self, input: &str, owner: &str) -> anyhow::Result<james_db::library::LibraryTrack>;
 }
 
 /// Shared state of all handlers.

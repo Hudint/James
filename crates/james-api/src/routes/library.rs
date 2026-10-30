@@ -17,6 +17,8 @@ pub fn routes() -> Router<AppState> {
     Router::new()
         .route("/library", get(search))
         .route("/library/scan", post(scan))
+        .route("/library/download", post(download))
+        .route("/library/download/{job}", get(download_status))
         .route("/library/{id}", get(one))
         .route("/library/{id}/names", put(rename).delete(reset_names))
         .route(
@@ -201,6 +203,143 @@ async fn one(
         .await?
         .map(Json)
         .ok_or_else(|| ApiError::not_found("track"))
+}
+
+#[derive(Deserialize)]
+struct DownloadRequest {
+    /// URL or search (like playing), e.g. a YouTube link.
+    input: String,
+}
+
+/// Outcome of a save that went on in the background, for its user to ask for.
+enum SaveJob {
+    Running,
+    Done(LibraryTrack),
+    Failed(String),
+}
+
+/// Background saves by job id: (user, created, state). Kept for [`JOB_TTL`].
+type SaveJobs = parking_lot::Mutex<std::collections::HashMap<String, (i64, std::time::Instant, SaveJob)>>;
+static JOBS: std::sync::LazyLock<SaveJobs> = std::sync::LazyLock::new(Default::default);
+const JOB_TTL: std::time::Duration = std::time::Duration::from_secs(600);
+const MAX_JOBS: usize = 1000;
+/// Background saves one user may have running at once, and kept in all.
+const MAX_USER_JOBS: usize = 3;
+const MAX_USER_KEPT_JOBS: usize = 20;
+
+/// Marks its job failed when dropped before [`JobGuard::finish`] (the save task panicked).
+struct JobGuard(Option<String>);
+
+impl JobGuard {
+    fn finish(mut self, state: SaveJob) {
+        if let Some(id) = self.0.take() {
+            set_job(&id, state);
+        }
+    }
+}
+
+impl Drop for JobGuard {
+    fn drop(&mut self) {
+        if let Some(id) = self.0.take() {
+            set_job(&id, SaveJob::Failed("saving failed".into()));
+        }
+    }
+}
+
+fn set_job(id: &str, state: SaveJob) {
+    if let Some(job) = JOBS.lock().get_mut(id) {
+        job.2 = state;
+    }
+}
+
+/// The state of a background save (`running`, `done` with the track, `failed` with the error).
+async fn download_status(auth: Auth, Path(job): Path<String>) -> ApiResult<Json<serde_json::Value>> {
+    auth.require("library.download", None)?;
+    let mut jobs = JOBS.lock();
+    // Only its own user learns about a job.
+    let Some((_, _, state)) = jobs.get(&job).filter(|(user, ..)| *user == auth.user.id) else {
+        return Err(ApiError::not_found("job"));
+    };
+    let answer = match state {
+        SaveJob::Running => return Ok(Json(json!({ "state": "running" }))),
+        SaveJob::Done(track) => json!({ "state": "done", "track": track }),
+        SaveJob::Failed(error) => json!({ "state": "failed", "error": error }),
+    };
+    // Told once: a finished job is gone afterwards.
+    jobs.remove(&job);
+    Ok(Json(answer))
+}
+
+/// How long a save request waits for the result; longer saves finish in the background
+/// (reverse proxies cut requests after about a minute).
+const SAVE_WAIT: std::time::Duration = std::time::Duration::from_secs(45);
+
+/// Saves a track of another source (YouTube, …) as a file in the library: `201` with its entry
+/// (the existing one if it was saved before), or `202` when it takes longer and continues in
+/// the background (`{pending, job}`: ask `GET /library/download/{job}` for the outcome).
+async fn download(
+    State(state): State<AppState>,
+    auth: Auth,
+    Json(body): Json<DownloadRequest>,
+) -> ApiResult<axum::response::Response> {
+    use axum::response::IntoResponse;
+    auth.require("library.download", None)?;
+    state.actions.check(auth.user.id)?;
+    let input = body.input.trim().to_owned();
+    if input.is_empty() || input.len() > 2048 {
+        return Err(ApiError::bad_request("enter a link or a search"));
+    }
+    let library = state.library.clone();
+    let user = auth.user.username.clone();
+    let owner = format!("user:{}", auth.user.id);
+    let job = format!("{:016x}", rand::random::<u64>());
+    {
+        let mut jobs = JOBS.lock();
+        jobs.retain(|_, (_, created, _)| created.elapsed() < JOB_TTL);
+        let mine = jobs.values().filter(|(user, ..)| *user == auth.user.id);
+        let running = mine
+            .clone()
+            .filter(|(_, _, state)| matches!(state, SaveJob::Running))
+            .count();
+        if jobs.len() >= MAX_JOBS || running >= MAX_USER_JOBS || mine.count() >= MAX_USER_KEPT_JOBS {
+            return Err(ApiError::new(
+                StatusCode::TOO_MANY_REQUESTS,
+                "too many saves at once, try again later",
+            ));
+        }
+        jobs.insert(
+            job.clone(),
+            (auth.user.id, std::time::Instant::now(), SaveJob::Running),
+        );
+    }
+    let guard = JobGuard(Some(job.clone()));
+    // Its own task: a closed browser tab or a cut connection does not stop the save.
+    let mut task = tokio::spawn(async move {
+        let result = library.save(&input, &owner).await;
+        guard.finish(match &result {
+            Ok(track) => SaveJob::Done(track.clone()),
+            Err(e) => SaveJob::Failed(crate::error::user_message(&format!("{e:#}"))),
+        });
+        match &result {
+            // Titles come from websites: logged escaped. Errors may carry the input: debug only.
+            Ok(track) => {
+                tracing::info!(%user, track = track.id, title = ?track.title, "saved to the library")
+            }
+            Err(e) => tracing::debug!(%user, error = %format!("{e:#}"), "saving to the library failed"),
+        }
+        result
+    });
+    match tokio::time::timeout(SAVE_WAIT, &mut task).await {
+        Ok(joined) => {
+            JOBS.lock().remove(&job);
+            let track = joined.map_err(|e| {
+                tracing::error!(error = %e, "the save task failed");
+                ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, "internal error")
+            })??;
+            Ok((StatusCode::CREATED, Json(track)).into_response())
+        }
+        Err(_) => Ok((StatusCode::ACCEPTED, Json(json!({ "pending": true, "job": job }))).into_response()),
+    }
 }
 
 /// Starts a rescan in the background (a large library takes long); `202 Accepted`.

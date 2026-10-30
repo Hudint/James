@@ -157,6 +157,12 @@ pub trait SourceResolver: Send + Sync {
         anyhow::bail!("source '{}' does not support search", self.id())
     }
 
+    /// Saves the track's audio as a file in `dir` (an empty, private directory) for the local
+    /// library and returns its path. Sources that cannot save tracks return an error.
+    async fn download(&self, track: &Track, _dir: &std::path::Path) -> anyhow::Result<PathBuf> {
+        anyhow::bail!("tracks from '{}' cannot be saved to the library", track.source)
+    }
+
     /// Key under which analysis results (loudness) of the track are cached; it must change
     /// when the content changes. `None` disables caching.
     async fn cache_key(&self, track: &Track) -> Option<String> {
@@ -229,6 +235,28 @@ impl SourceRegistry {
             .open(track)
             .await
     }
+
+    /// See [`SourceResolver::download`].
+    pub async fn download(&self, track: &Track, dir: &std::path::Path) -> anyhow::Result<PathBuf> {
+        self.get(&track.source)
+            .ok_or_else(|| anyhow::anyhow!("source '{}' is not available", track.source))?
+            .download(track, dir)
+            .await
+    }
+}
+
+/// Input for YouTube commands (`!yt`, `!ytdl`): links and inputs with a source prefix
+/// (`yt:`, `sc:`, `search:`) as they are, other text as a YouTube search.
+pub fn youtube_input(input: &str) -> String {
+    let input = input.trim();
+    let prefixed = ["yt", "sc", "search"]
+        .iter()
+        .any(|p| strip_scheme(input, p).is_some());
+    if is_http_url(input) || prefixed {
+        input.to_owned()
+    } else {
+        format!("yt:{input}")
+    }
 }
 
 /// Strips `prefix:` from an input, case-insensitively.
@@ -246,6 +274,17 @@ pub fn is_http_url(input: &str) -> bool {
 mod tests {
     use super::*;
     use std::sync::Arc;
+
+    #[test]
+    fn youtube_commands_search_youtube_unless_told_otherwise() {
+        assert_eq!(
+            youtube_input("queen: bohemian rhapsody"),
+            "yt:queen: bohemian rhapsody"
+        );
+        assert_eq!(youtube_input("https://youtu.be/x"), "https://youtu.be/x");
+        assert_eq!(youtube_input("sc:forss"), "sc:forss");
+        assert_eq!(youtube_input(" yt:song "), "yt:song");
+    }
 
     struct Fake(&'static str, &'static str);
 

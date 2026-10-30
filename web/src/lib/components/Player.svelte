@@ -6,6 +6,7 @@
   import { can, reportError } from '$lib/session.svelte';
   import type { InstanceStatus, RepeatMode } from '$lib/types';
   import Icon from './Icon.svelte';
+  import { canSave, savable, saveToLibrary, saving } from '$lib/saving.svelte';
 
   let { id, status }: { id: string; status: InstanceStatus } = $props();
 
@@ -85,6 +86,19 @@
           {#if status.loading}<span class="badge">{t('player.loading')}</span>{/if}
           {#if status.current?.requestedBy}<span class="truncate">{t('player.requestedBy', { name: status.current.requestedBy.name })}</span>{/if}
         </p>
+      {/if}
+      {#if savable(track) && canSave()}
+        {@const busy = saving.inputs.includes(track.locator)}
+        {@const done = saving.done.includes(track.locator)}
+        <!-- aria-disabled, not disabled: keyboard focus stays on the button meanwhile. -->
+        <button
+          class="btn btn-small btn-ghost flush save"
+          onclick={() => !busy && !done && saveToLibrary(track.locator)}
+          aria-disabled={busy || done}
+          aria-busy={busy}
+        >
+          <Icon name={done ? 'check' : 'download'} size={16} />{done ? t('library.inLibrary') : busy ? t('library.savingShort') : t('library.save')}
+        </button>
       {/if}
     {:else}
       <p class="title">{t('player.nothing')}</p>
@@ -231,6 +245,9 @@
     -webkit-box-orient: vertical;
     overflow: hidden;
     overflow-wrap: anywhere;
+  }
+  .save {
+    margin-top: var(--space-2);
   }
   .requested {
     display: flex;

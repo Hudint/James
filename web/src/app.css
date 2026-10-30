@@ -532,6 +532,14 @@ kbd {
   min-height: 30px;
   padding: 0 var(--space-3);
 }
+/* A ghost button whose text lines up with the text around it. */
+.btn-ghost.flush {
+  margin-left: calc(-1 * var(--space-3));
+}
+.btn[aria-disabled='true'] {
+  opacity: 0.6;
+  cursor: default;
+}
 
 .icon-btn {
   display: inline-grid;

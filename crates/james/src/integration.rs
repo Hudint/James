@@ -5,6 +5,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use james_api::LinkCodes;
 use james_core::platform::Client;
+use james_core::text::escape_markup;
 use james_db::permissions::allowed;
 use james_db::Db;
 use james_runtime::{Command, CommandContext, InstanceHandle, InstanceStore, PermissionChecker};
@@ -126,4 +127,89 @@ impl Command for LinkCommand {
 
 pub fn register_link_command(registry: &james_runtime::CommandRegistry, db: Db, links: LinkCodes) {
     registry.register(Arc::new(LinkCommand { db, links }));
+}
+
+/// `!ytdl`: saves a track (YouTube, …) to the library and plays it from there.
+pub struct SaveCommand {
+    pub library: Arc<dyn james_api::LibraryService>,
+}
+
+#[async_trait]
+impl Command for SaveCommand {
+    fn name(&self) -> &str {
+        "ytdl"
+    }
+    fn aliases(&self) -> Vec<&str> {
+        vec!["save"]
+    }
+    fn usage(&self) -> &str {
+        "<url|search>"
+    }
+    fn description(&self) -> &str {
+        "Saves a YouTube video (link or search) to the library and plays it"
+    }
+    fn permission(&self) -> Option<&str> {
+        Some("library.download")
+    }
+    async fn run(&self, ctx: &CommandContext) -> anyhow::Result<Option<String>> {
+        if ctx.args.is_empty() {
+            anyhow::bail!("missing argument");
+        }
+        let input = james_core::source::youtube_input(&ctx.args);
+        let library = self.library.clone();
+        let instance = ctx.instance.clone();
+        let invoker = ctx.invoker.clone();
+        let mode = ctx.mode;
+        // Saving takes a while: in its own task, so the client's other commands are not held up.
+        tokio::spawn(async move {
+            let owner = format!("client:{}:{}", instance.platform_id(), invoker.uid);
+            let reply = match library.save(&input, &owner).await {
+                Ok(track) => {
+                    let may_play = instance
+                        .services()
+                        .commands
+                        .allowed(&instance, &invoker, "playback.play")
+                        .await;
+                    let requester = Some(james_runtime::Requester {
+                        uid: invoker.uid.clone(),
+                        name: invoker.name.clone(),
+                    });
+                    if !may_play {
+                        format!("Saved to the library: {}", escape_markup(&track.title))
+                    } else {
+                        match instance
+                            .play(
+                                &format!("library:{}", track.id),
+                                james_runtime::PlayMode::Now,
+                                requester,
+                            )
+                            .await
+                        {
+                            Ok(_) => {
+                                format!("Saved to the library, playing: {}", escape_markup(&track.title))
+                            }
+                            Err(e) => format!(
+                                "Saved to the library: {} (cannot play it: {})",
+                                escape_markup(&track.title),
+                                escape_markup(&james_core::text::user_message(&format!("{e:#}")))
+                            ),
+                        }
+                    }
+                }
+                Err(e) => format!(
+                    "Error: {}",
+                    escape_markup(&james_core::text::user_message(&format!("{e:#}")))
+                ),
+            };
+            let _ = instance.reply(mode, &invoker, reply).await;
+        });
+        Ok(Some("Saving to the library…".into()))
+    }
+}
+
+pub fn register_save_command(
+    registry: &james_runtime::CommandRegistry,
+    library: Arc<dyn james_api::LibraryService>,
+) {
+    registry.register(Arc::new(SaveCommand { library }));
 }

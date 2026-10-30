@@ -59,6 +59,10 @@ complete file.
 | `playlist_limit` | `500` | Entries taken from one playlist URL |
 | `timeout_secs` | `60` | Limit for resolving one input |
 | `search_fallback` | `true` | Treat plain text as a YouTube search |
+| `download_max_duration_secs` | `10800` | Longest track that can be saved to the library |
+| `download_max_size_mb` | `300` | Largest file that can be saved to the library |
+| `download_timeout_secs` | `900` | Time limit for saving one track |
+| `download_quota_mb` | `20000` | Space all saved tracks may take together (`media/downloads`); checked before each save, so saves running at the same time can exceed it by up to `download_max_size_mb` each |
 
 ## `[network]`
 

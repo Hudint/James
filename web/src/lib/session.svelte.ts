@@ -39,16 +39,19 @@ export interface Toast {
   id: number;
   kind: 'info' | 'success' | 'error';
   text: string;
+  /** Stays (with a busy indicator) until dismissed in code: for long operations. */
+  sticky?: boolean;
 }
 
 export const toasts = $state<Toast[]>([]);
 let nextToast = 1;
 
-export function toast(text: string, kind: Toast['kind'] = 'info') {
+export function toast(text: string, kind: Toast['kind'] = 'info', options: { sticky?: boolean } = {}): number {
   const id = nextToast++;
-  toasts.push({ id, kind, text });
+  toasts.push({ id, kind, text, sticky: options.sticky });
   // Errors stay until dismissed, so they can be read at any pace.
-  if (kind !== 'error') setTimeout(() => dismissToast(id), 4000);
+  if (kind !== 'error' && !options.sticky) setTimeout(() => dismissToast(id), 4000);
+  return id;
 }
 
 export function dismissToast(id: number) {

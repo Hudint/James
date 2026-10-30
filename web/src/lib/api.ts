@@ -207,6 +207,14 @@ export const api = {
   resetTrackNames: (id: number) =>
     request<LibraryTrack>("DELETE", `/library/${id}/names`),
   scanLibrary: () => request<void>("POST", "/library/scan"),
+  /** The saved track, or `pending` when it takes longer and continues in the background. */
+  saveToLibrary: (input: string) =>
+    request<LibraryTrack | { pending: true; job: string }>("POST", "/library/download", { input }),
+  saveStatus: (job: string) =>
+    request<{ state: 'running' } | { state: 'done'; track: LibraryTrack } | { state: 'failed'; error: string }>(
+      "GET",
+      `/library/download/${enc(job)}`,
+    ),
   upload: (files: FileList | File[]) => {
     const form = new FormData();
     for (const file of Array.from(files)) form.append("file", file, file.name);

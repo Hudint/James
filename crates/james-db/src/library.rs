@@ -173,6 +173,16 @@ impl Db {
         )
     }
 
+    pub async fn library_track_by_path(&self, path: &str) -> Result<Option<LibraryTrack>> {
+        Ok(
+            sqlx::query_as::<_, Row>(&format!("SELECT {COLUMNS} FROM library_tracks WHERE path = ?"))
+                .bind(path)
+                .fetch_optional(self.pool())
+                .await?
+                .map(map),
+        )
+    }
+
     /// Searches names and path (case-insensitive substring match).
     pub async fn search_library(&self, query: &str, limit: i64, offset: i64) -> Result<Vec<LibraryTrack>> {
         Ok(sqlx::query_as::<_, Row>(&format!(

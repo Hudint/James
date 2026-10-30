@@ -38,6 +38,14 @@ pub struct YtDlpConfig {
     pub timeout_secs: u64,
     /// Accept free text (no prefix, no URL) as YouTube search.
     pub search_fallback: bool,
+    /// Longest track that can be saved to the library (seconds).
+    pub download_max_duration_secs: u64,
+    /// Largest file that can be saved to the library (MB).
+    pub download_max_size_mb: u64,
+    /// Time limit of one download to the library (seconds).
+    pub download_timeout_secs: u64,
+    /// Space all saved tracks may take together (MB).
+    pub download_quota_mb: u64,
 }
 
 impl Default for YtDlpConfig {
@@ -53,6 +61,10 @@ impl Default for YtDlpConfig {
             playlist_limit: 500,
             timeout_secs: 60,
             search_fallback: true,
+            download_max_duration_secs: 3 * 3600,
+            download_max_size_mb: 300,
+            download_timeout_secs: 900,
+            download_quota_mb: 20_000,
         }
     }
 }
@@ -64,6 +76,8 @@ pub struct YtDlpResolver {
     /// Private directory for per-run cookie copies.
     work_dir: PathBuf,
     uploaded_cookies: Option<PathBuf>,
+    /// ffmpeg for extracting the audio of downloads (`None`: yt-dlp looks in `PATH`).
+    ffmpeg: Option<PathBuf>,
 }
 
 impl YtDlpResolver {
@@ -84,7 +98,14 @@ impl YtDlpResolver {
             egress_proxy,
             work_dir,
             uploaded_cookies: None,
+            ffmpeg: None,
         }
+    }
+
+    /// The ffmpeg binary yt-dlp uses to extract the audio of downloads.
+    pub fn with_ffmpeg(mut self, ffmpeg: impl Into<PathBuf>) -> Self {
+        self.ffmpeg = Some(ffmpeg.into());
+        self
     }
 
     /// Cookie file uploaded in the web interface; used when it exists and `cookies` is not
@@ -131,6 +152,59 @@ impl YtDlpResolver {
         args.extend(["-q", "--no-playlist", "--no-part", "-f"].map(String::from));
         args.push(restrict_protocols(&self.config.format));
         args.extend(["-o", "-", "--", locator].map(String::from));
+        args
+    }
+
+    /// Arguments of a run saving the audio of `locator` into `dir` (for the library): the audio
+    /// stream as it is (no re-encoding) in an audio container, with title and artist as tags.
+    /// Prints the path of the saved file.
+    fn save_args(&self, cookies: Option<&Path>, locator: &str, dir: &Path) -> Vec<String> {
+        let mut args = self.base_args(cookies);
+        args.extend(
+            [
+                "-q",
+                "--no-playlist",
+                "--no-part",
+                "--no-mtime",
+                "--no-simulate",
+                "--restrict-filenames",
+            ]
+            .map(String::from),
+        );
+        args.extend(["-f".into(), restrict_protocols(&self.config.format)]);
+        args.extend([
+            // Unknown durations are refused (`<=`, not `<=?`); nothing only the account may see.
+            "--match-filter".into(),
+            format!(
+                "!is_live & duration <= {} & availability !=? private & availability !=? premium_only \
+                 & availability !=? subscriber_only & availability !=? needs_auth",
+                self.config.download_max_duration_secs
+            ),
+            "--max-filesize".into(),
+            format!("{}M", self.config.download_max_size_mb),
+            "-x".into(),
+            "--embed-metadata".into(),
+            // Music videos rarely name an artist: the channel instead.
+            "--parse-metadata".into(),
+            // `|` = empty when none is known (not "NA").
+            "%(artist,creator,uploader,channel|)s:%(meta_artist)s".into(),
+        ]);
+        // A bare name is looked up in `PATH` by yt-dlp itself (as a location it would be a path).
+        if let Some(ffmpeg) = self.ffmpeg.as_ref().filter(|f| f.components().count() > 1) {
+            args.extend(["--ffmpeg-location".into(), ffmpeg.display().to_string()]);
+        }
+        args.extend([
+            // The directory apart from the template (a `%` in its path is not a field).
+            "-P".into(),
+            dir.display().to_string(),
+            "-o".into(),
+            // The extractor in the name: an id from another site never passes for a YouTube one.
+            "%(extractor_key)s-%(id)s.%(ext)s".into(),
+            "--print".into(),
+            "after_move:filepath".into(),
+            "--".into(),
+            locator.into(),
+        ]);
         args
     }
 
@@ -243,6 +317,54 @@ impl SourceResolver for YtDlpResolver {
             return Err(anyhow!("nothing found for '{input}'"));
         }
         Ok(tracks)
+    }
+
+    async fn download(&self, track: &Track, dir: &Path) -> anyhow::Result<PathBuf> {
+        if !is_http_url(&track.locator) {
+            return Err(anyhow!("invalid locator"));
+        }
+        if track.is_stream {
+            bail!("live streams cannot be saved");
+        }
+        let locator = self.network.check(&track.locator).await?;
+        self.check_personal(&locator)?;
+        // yt-dlp prints absolute paths: compared with the absolute directory.
+        let dir = &tokio::fs::canonicalize(dir)
+            .await
+            .context("no download directory")?;
+        let cookies = cookie_copy(self.cookies_for(&locator).as_deref(), &self.work_dir).await?;
+        let mut cmd = Command::new(&self.config.binary);
+        cmd.args(self.save_args(cookies.as_deref().map(TempFile::path), &locator, dir));
+        james_core::process::apply_proxy_env(&mut cmd, self.proxy().as_deref());
+        let out = crate::run_download(
+            cmd,
+            Duration::from_secs(self.config.download_timeout_secs),
+            dir,
+            self.config.download_max_size_mb.saturating_mul(1024 * 1024),
+        )
+        .await
+        // yt-dlp's messages may name the private download directory.
+        .map_err(|e| {
+            let message = format!("{e:#}")
+                .replace(&dir.display().to_string(), "…")
+                .replace(&self.work_dir.display().to_string(), "…");
+            anyhow!("{message}")
+        })?;
+        let printed = String::from_utf8_lossy(&out);
+        let path = printed
+            .lines()
+            .map(str::trim)
+            .rfind(|l| !l.is_empty())
+            .map(PathBuf::from)
+            // Filtered out (too long, too large, live) leaves nothing behind.
+            .ok_or_else(|| anyhow!("nothing was saved (too long or too large, or a live stream)"))?;
+        // Only a file yt-dlp put where it was told to, and one the library plays.
+        let path = tokio::fs::canonicalize(&path).await.unwrap_or(path);
+        let inside = path.parent() == Some(dir.as_path()) && path.is_file();
+        if !inside || !james_core::media::is_audio_path(&path) {
+            bail!("yt-dlp did not save an audio file");
+        }
+        Ok(path)
     }
 
     async fn open(&self, track: &Track) -> anyhow::Result<MediaInput> {
@@ -561,6 +683,38 @@ mod tests {
             &args[args.len() - 2..],
             ["--", "https://www.youtube.com/watch?v=x"]
         );
+    }
+
+    #[test]
+    fn saving_keeps_the_limits_and_writes_into_the_directory() {
+        let dir = std::env::temp_dir().join("james-save");
+        let r = YtDlpResolver::new(
+            YtDlpConfig::default(),
+            NetworkPolicy::default(),
+            None,
+            std::env::temp_dir(),
+        )
+        .with_ffmpeg("ffmpeg");
+        let args = r.save_args(None, "https://www.youtube.com/watch?v=x", &dir);
+        let after = |flag: &str| args[args.iter().position(|a| a == flag).unwrap() + 1].clone();
+        assert!(after("-f").ends_with(PROTOCOL_FILTER));
+        assert!(
+            after("--match-filter").starts_with("!is_live & duration <= 10800 & availability !=? private")
+        );
+        assert_eq!(after("--max-filesize"), "300M");
+        assert_eq!(after("-o"), "%(extractor_key)s-%(id)s.%(ext)s");
+        assert_eq!(after("-P"), dir.display().to_string());
+        assert!(
+            !args.contains(&"--ffmpeg-location".to_owned()),
+            "a bare name is found in PATH"
+        );
+        assert_eq!(
+            &args[args.len() - 2..],
+            ["--", "https://www.youtube.com/watch?v=x"]
+        );
+        let r = r.with_ffmpeg("/opt/ffmpeg/bin/ffmpeg");
+        let args = r.save_args(None, "https://www.youtube.com/watch?v=x", &dir);
+        assert!(args.contains(&"/opt/ffmpeg/bin/ffmpeg".to_owned()));
     }
 
     #[test]

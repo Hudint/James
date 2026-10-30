@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { onMount, tick } from 'svelte';
+  import { onMount, tick, untrack } from 'svelte';
   import { api } from '$lib/api';
   import ActionMenu from '$lib/components/ActionMenu.svelte';
   import Icon from '$lib/components/Icon.svelte';
@@ -9,6 +9,7 @@
   import { t } from '$lib/i18n/index.svelte';
   import { can, errorMessage, reportError, toast } from '$lib/session.svelte';
   import type { LibraryTrack } from '$lib/types';
+  import { canSave, saveToLibrary, saving, toSaveInput } from '$lib/saving.svelte';
 
   const PAGE = 100;
   // Phones: add-to-queue and editing share a menu, so the title keeps its width.
@@ -22,6 +23,26 @@
   let uploading = $state(false);
   let scanning = $state(false);
   let fileInput = $state<HTMLInputElement>();
+
+  // Saving from the web (YouTube, …): the dialog closes at once, the toasts tell the progress.
+  let webDialog = $state<HTMLDialogElement>();
+  let webInput = $state('');
+  function openWebDialog() {
+    webInput = '';
+    webDialog?.showModal();
+  }
+  // A save finished (also one started elsewhere on this page): show it.
+  $effect(() => {
+    if (saving.version > 0) untrack(() => void search());
+  });
+
+  async function saveFromWeb(event: SubmitEvent) {
+    event.preventDefault();
+    const value = webInput.trim();
+    if (!value) return;
+    webDialog?.close();
+    await saveToLibrary(toSaveInput(value));
+  }
 
   let searchId = 0;
   async function search(append = false) {
@@ -203,14 +224,40 @@
 <div class="page">
   <header class="page-header">
     <h1>{t('library.title')}</h1>
-    {#if can('library.manage')}
+    {#if phone.matches && can('library.manage') && canSave()}
+      <!-- Phones: both ways of adding in one menu, so the header stays one row. -->
+      <input bind:this={fileInput} type="file" accept="audio/*" multiple class="visually-hidden" id="upload" onchange={() => upload()} />
+      <ActionMenu
+        label={t('library.add')}
+        title={t('library.add')}
+        button={{ icon: 'plus', text: t('library.add') }}
+        items={[
+          { label: t('library.upload'), icon: 'upload', disabled: uploading, onclick: () => fileInput?.click() },
+          { label: t('library.saveFromWeb'), icon: 'download', onclick: openWebDialog },
+        ]}
+      />
+      <button class="btn rescan" onclick={scan} disabled={scanning} aria-label={t('library.scan')} title={t('library.scan')}>
+        <Icon name="refresh" size={16} /><span class="label-text">{t('library.scan')}</span>
+      </button>
+    {:else if can('library.manage')}
       <input bind:this={fileInput} type="file" accept="audio/*" multiple class="visually-hidden" id="upload" onchange={() => upload()} />
       <label for="upload" class="btn" class:disabled={uploading}><Icon name="upload" size={16} />{uploading ? t('library.uploading') : t('library.upload')}</label>
       <button class="btn rescan" onclick={scan} disabled={scanning} aria-label={t('library.scan')} title={t('library.scan')}>
         <Icon name="refresh" size={16} /><span class="label-text">{t('library.scan')}</span>
       </button>
     {/if}
+    {#if canSave() && !(phone.matches && can('library.manage'))}
+      <button class="btn" onclick={openWebDialog}><Icon name="download" size={16} />{t('library.saveFromWeb')}</button>
+    {/if}
   </header>
+
+  {#if saving.inputs.length}
+    <ul class="pending" aria-busy="true">
+      {#each saving.inputs as input (input)}
+        <li><span class="meter" aria-hidden="true"><i></i><i></i><i></i></span><span class="truncate">{t('library.savingItem', { input: input.replace(/^yt:/i, '') })}</span></li>
+      {/each}
+    </ul>
+  {/if}
 
   <div class="toolbar">
     <div class="search">
@@ -360,7 +407,42 @@
   {/if}
 </dialog>
 
+<dialog bind:this={webDialog} class="modal" aria-labelledby="web-title">
+  <form onsubmit={saveFromWeb}>
+    <h2 id="web-title">{t('library.saveFromWeb')}</h2>
+    <p class="muted small">{t('library.saveFromWebHint')}</p>
+    <div class="field">
+      <label for="web-input">{t('library.saveFromWebLabel')}</label>
+      <!-- svelte-ignore a11y_autofocus -->
+      <input id="web-input" type="text" bind:value={webInput} placeholder={t('library.saveFromWebPlaceholder')} autocomplete="off" maxlength="2048" autofocus />
+    </div>
+    <div class="actions">
+      <button type="button" class="btn" onclick={() => webDialog?.close()}>{t('common.cancel')}</button>
+      <button type="submit" class="btn btn-primary" disabled={!webInput.trim()}><Icon name="download" size={16} />{t('library.save')}</button>
+    </div>
+  </form>
+</dialog>
+
 <style>
+  .pending {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-2);
+  }
+  .pending li {
+    display: flex;
+    align-items: center;
+    gap: var(--space-3);
+    padding: var(--space-3) var(--space-4);
+    border-radius: var(--radius-lg);
+    border: 1px dashed var(--border);
+    background: var(--surface);
+    font-size: var(--text-sm);
+    animation: rise var(--dur-3) var(--ease-out);
+  }
   .title-col {
     width: 45%;
   }

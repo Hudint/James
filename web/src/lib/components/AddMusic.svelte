@@ -7,6 +7,7 @@
   import type { PlayMode, QueueItem, Track } from '$lib/types';
   import { mediaQuery } from '$lib/media.svelte';
   import ActionMenu from './ActionMenu.svelte';
+  import { canSave, isSearch, savable, saveToLibrary, saving, toSaveInput } from '$lib/saving.svelte';
   import Icon from './Icon.svelte';
 
   // Phones: one row (field, main action, menu); what people type there is mostly a search.
@@ -65,6 +66,15 @@
     }
   }
 
+  /** Saves the typed link or search to the library (the field keeps it, to play it next). */
+  async function saveInput() {
+    const value = input.trim();
+    if (!value || saving.inputs.includes(toSaveInput(value))) return;
+    await saveToLibrary(toSaveInput(value));
+  }
+  const saveLabel = $derived(isSearch(input) ? t('library.saveTopResult') : t('library.save'));
+  const savingInput = $derived(!!input.trim() && saving.inputs.includes(toSaveInput(input)));
+
   async function addResult(track: Track, mode: PlayMode) {
     try {
       added(await api.addTracks(id, [track], mode));
@@ -115,6 +125,7 @@
             { label: t('player.addToQueue'), icon: 'plus', disabled: !input.trim() || busy !== null, onclick: () => add('append') },
             { label: t('player.playNext'), icon: 'next', disabled: !input.trim() || busy !== null, onclick: () => add('next') },
             { label: t('player.playNow'), icon: 'play', disabled: !input.trim() || busy !== null, onclick: () => add('now') },
+            ...(canSave() ? [{ label: saveLabel, icon: 'download' as const, disabled: !input.trim() || savingInput, onclick: () => void saveInput() }] : []),
           ]}
         />
       </div>
@@ -147,6 +158,11 @@
           {#if !isUrl(input.trim())}
             <button class="btn btn-small btn-ghost" type="button" onclick={search} disabled={busy !== null}>
               <Icon name="search" size={16} />{busy === 'search' ? t('player.searching') : t('common.search')}
+            </button>
+          {/if}
+          {#if canSave()}
+            <button class="btn btn-small btn-ghost" type="button" onclick={saveInput} aria-disabled={savingInput} aria-busy={savingInput}>
+              <Icon name="download" size={16} />{savingInput ? t('library.savingShort') : saveLabel}
             </button>
           {/if}
         </span>
@@ -196,6 +212,9 @@
                   items={[
                     { label: t('player.playNow'), icon: 'play', onclick: () => addResult(track, 'now') },
                     { label: t('player.playNext'), icon: 'next', onclick: () => addResult(track, 'next') },
+                    ...(canSave() && savable(track)
+                      ? [{ label: t('library.save'), icon: 'download' as const, disabled: saving.inputs.includes(track.locator), onclick: () => void saveToLibrary(track.locator) }]
+                      : []),
                   ]}
                 />
               {:else}
@@ -210,6 +229,19 @@
                 <button class="icon-btn small" onclick={() => addResult(track, 'append')} aria-label="{t('player.addToQueue')}: {track.title}" title={t('player.addToQueue')}>
                   <Icon name="plus" size={16} />
                 </button>
+                {#if canSave() && savable(track)}
+                  <span class="divider" aria-hidden="true"></span>
+                  <button
+                    class="icon-btn small"
+                    onclick={() => !saving.inputs.includes(track.locator) && saveToLibrary(track.locator)}
+                    aria-disabled={saving.inputs.includes(track.locator)}
+                    aria-busy={saving.inputs.includes(track.locator)}
+                    aria-label="{t('library.save')}: {track.title}"
+                    title={t('library.save')}
+                  >
+                    <Icon name="download" size={16} />
+                  </button>
+                {/if}
               </div>
               {/if}
             </li>
@@ -221,6 +253,12 @@
 </section>
 
 <style>
+  .divider {
+    width: 1px;
+    height: 20px;
+    margin: 0 var(--space-1);
+    background: var(--border);
+  }
   .more-actions {
     display: inline-flex;
     flex-wrap: wrap;

@@ -23,6 +23,7 @@
     label,
     title,
     small = false,
+    button: buttonLook,
   }: {
     items: MenuItem[];
     /** Accessible name of the button, e.g. "More actions: Song title". */
@@ -30,6 +31,8 @@
     /** Heading of the sheet on phones (e.g. the track title). */
     title?: string;
     small?: boolean;
+    /** A labelled button (icon and text) instead of the "⋯" icon. */
+    button?: { icon: IconName; text: string };
   } = $props();
 
   let dialog = $state<HTMLDialogElement | null>(null);
@@ -67,19 +70,25 @@
   }
 </script>
 
-<button
-  bind:this={button}
-  class="icon-btn"
-  class:small
-  type="button"
-  data-action="menu"
-  aria-haspopup="dialog"
-  aria-label={label}
-  title={label}
-  onclick={open}
->
-  <Icon name="more" size={small ? 16 : 20} />
-</button>
+{#if buttonLook}
+  <button bind:this={button} class="btn" type="button" data-action="menu" aria-haspopup="dialog" onclick={open}>
+    <Icon name={buttonLook.icon} size={16} />{buttonLook.text}<Icon name="down" size={14} />
+  </button>
+{:else}
+  <button
+    bind:this={button}
+    class="icon-btn"
+    class:small
+    type="button"
+    data-action="menu"
+    aria-haspopup="dialog"
+    aria-label={label}
+    title={label}
+    onclick={open}
+  >
+    <Icon name="more" size={small ? 16 : 20} />
+  </button>
+{/if}
 
 <dialog bind:this={dialog} class="menu" style={position} onclick={backdrop} onclose={() => (isOpen = false)} aria-label={title ?? label}>
   {#if isOpen}

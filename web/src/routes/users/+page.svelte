@@ -24,6 +24,7 @@
     'instance.speech',
     'library.read',
     'library.manage',
+    'library.download',
     'playlist.read',
     'playlist.manage',
     'tts.say',

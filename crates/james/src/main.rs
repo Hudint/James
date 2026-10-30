@@ -111,7 +111,8 @@ async fn run(
                 Some(egress.url().to_owned()),
                 work_dir.clone(),
             )
-            .with_uploaded_cookies(config.data_dir.join(james_api::YOUTUBE_COOKIES_FILE)),
+            .with_uploaded_cookies(config.data_dir.join(james_api::YOUTUBE_COOKIES_FILE))
+            .with_ffmpeg(&config.tools.ffmpeg),
         ),
     );
 
@@ -142,12 +143,23 @@ async fn run(
     let plugins_for_shutdown = plugins.clone();
     manager.start_autostart().await;
 
-    let scanner = Arc::new(library::LibraryScanner::new(
-        db.clone(),
-        media_dirs,
-        media_dir.join("uploads"),
-        config.tools.ffprobe.clone(),
-    ));
+    let downloads = media_dir.join("downloads");
+    std::fs::create_dir_all(&downloads)?;
+    let scanner = Arc::new(
+        library::LibraryScanner::new(
+            db.clone(),
+            media_dirs,
+            media_dir.join("uploads"),
+            config.tools.ffprobe.clone(),
+        )
+        .with_downloads(
+            manager.services().sources.clone(),
+            downloads,
+            work_dir.clone(),
+            config.ytdlp.download_quota_mb.saturating_mul(1024 * 1024),
+        ),
+    );
+    integration::register_save_command(&manager.services().commands, scanner.clone());
     {
         let scanner = scanner.clone();
         tokio::spawn(async move {

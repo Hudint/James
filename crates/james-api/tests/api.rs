@@ -68,6 +68,22 @@ impl LibraryService for FakeLibrary {
     fn upload_dir(&self) -> PathBuf {
         self.dir.clone()
     }
+    async fn save(&self, input: &str, _owner: &str) -> anyhow::Result<james_db::library::LibraryTrack> {
+        anyhow::ensure!(input != "a playlist", "this is a playlist (3 tracks)");
+        Ok(james_db::library::LibraryTrack {
+            id: 7,
+            path: "/m/downloads/Song [x].opus".into(),
+            title: input.into(),
+            artist: None,
+            album: None,
+            duration_ms: None,
+            size: 1,
+            mtime: 1,
+            added_at: 1,
+            edited: false,
+            tags: Default::default(),
+        })
+    }
 }
 
 struct Api {
@@ -642,6 +658,74 @@ async fn uploads_are_sanitised() {
         api.send(upload("script.sh")).await.status,
         StatusCode::BAD_REQUEST,
         "audio files only"
+    );
+}
+
+#[tokio::test]
+async fn tracks_are_saved_to_the_library() {
+    let api = Api::new().await;
+    let (_, manager) = api
+        .user_with_grants("manager", &[Grant::global("library.manage")])
+        .await;
+    let (_, saver) = api
+        .user_with_grants("saver", &[Grant::global("library.download")])
+        .await;
+    let body = json!({ "input": "https://youtu.be/x" });
+    assert_eq!(
+        api.call(Method::POST, "/library/download", None, Some(body.clone()))
+            .await
+            .status,
+        StatusCode::UNAUTHORIZED
+    );
+    assert_eq!(
+        api.call(
+            Method::POST,
+            "/library/download",
+            Some(&manager),
+            Some(body.clone())
+        )
+        .await
+        .status,
+        StatusCode::FORBIDDEN,
+        "a permission of its own"
+    );
+    let r = api
+        .call(Method::POST, "/library/download", Some(&saver), Some(body))
+        .await;
+    assert_eq!(r.status, StatusCode::CREATED, "{}", r.body);
+    assert_eq!(r.body["id"], 7);
+    assert_eq!(
+        api.call(
+            Method::POST,
+            "/library/download",
+            Some(&saver),
+            Some(json!({ "input": " " }))
+        )
+        .await
+        .status,
+        StatusCode::BAD_REQUEST
+    );
+    let r = api
+        .call(
+            Method::POST,
+            "/library/download",
+            Some(&saver),
+            Some(json!({ "input": "a playlist" })),
+        )
+        .await;
+    assert_eq!(r.status, StatusCode::UNPROCESSABLE_ENTITY);
+    assert!(r.body["error"].as_str().unwrap().contains("playlist"));
+    assert_eq!(
+        api.call(
+            Method::GET,
+            "/library/download/0123456789abcdef",
+            Some(&saver),
+            None
+        )
+        .await
+        .status,
+        StatusCode::NOT_FOUND,
+        "unknown jobs"
     );
 }
 
