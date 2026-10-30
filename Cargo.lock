@@ -1855,7 +1855,7 @@ checksum = "8f42a60cbdf9a97f5d2305f08a87dc4e09308d1276d28c869c684d7777685682"
 
 [[package]]
 name = "james"
-version = "0.8.1"
+version = "0.8.2"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -1883,7 +1883,7 @@ dependencies = [
 
 [[package]]
 name = "james-api"
-version = "0.8.1"
+version = "0.8.2"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -1916,7 +1916,7 @@ dependencies = [
 
 [[package]]
 name = "james-audio"
-version = "0.8.1"
+version = "0.8.2"
 dependencies = [
  "anyhow",
  "audiopus",
@@ -1931,7 +1931,7 @@ dependencies = [
 
 [[package]]
 name = "james-core"
-version = "0.8.1"
+version = "0.8.2"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -1946,7 +1946,7 @@ dependencies = [
 
 [[package]]
 name = "james-db"
-version = "0.8.1"
+version = "0.8.2"
 dependencies = [
  "anyhow",
  "argon2",
@@ -1964,7 +1964,7 @@ dependencies = [
 
 [[package]]
 name = "james-plugins"
-version = "0.8.1"
+version = "0.8.2"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -1985,7 +1985,7 @@ dependencies = [
 
 [[package]]
 name = "james-runtime"
-version = "0.8.1"
+version = "0.8.2"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2006,7 +2006,7 @@ dependencies = [
 
 [[package]]
 name = "james-sources"
-version = "0.8.1"
+version = "0.8.2"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2025,7 +2025,7 @@ dependencies = [
 
 [[package]]
 name = "james-stt"
-version = "0.8.1"
+version = "0.8.2"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2041,7 +2041,7 @@ dependencies = [
 
 [[package]]
 name = "james-teamspeak"
-version = "0.8.1"
+version = "0.8.2"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2065,7 +2065,7 @@ dependencies = [
 
 [[package]]
 name = "james-tts"
-version = "0.8.1"
+version = "0.8.2"
 dependencies = [
  "anyhow",
  "async-trait",

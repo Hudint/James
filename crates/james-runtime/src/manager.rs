@@ -33,8 +33,8 @@ pub struct Services {
     pub tts: Arc<RwLock<james_core::tts::TtsRegistry>>,
     /// Speech recognition providers.
     pub stt: Arc<RwLock<james_core::stt::SttRegistry>>,
-    /// Identities of all instances' bots (their voices are not listened to).
-    pub bot_uids: Arc<RwLock<std::collections::HashSet<String>>>,
+    /// Identity of each instance's bot, by instance (their voices are not listened to).
+    pub bot_uids: Arc<RwLock<HashMap<String, String>>>,
 }
 
 impl Services {
@@ -197,6 +197,7 @@ impl InstanceManager {
         persist().await?;
         // The lifecycle lock entry stays: another task may still be waiting on it.
         self.configs.write().remove(id);
+        self.services.bot_uids.write().remove(id);
         Ok(())
     }
 
@@ -206,6 +207,7 @@ impl InstanceManager {
         let _guard = lock.lock().await;
         self.stop_locked(id).await;
         self.configs.write().remove(id);
+        self.services.bot_uids.write().remove(id);
     }
 
     pub fn configs(&self) -> Vec<InstanceConfig> {

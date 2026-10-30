@@ -141,6 +141,53 @@ impl SpeechSettings {
 }
 
 #[cfg(test)]
+mod announcement_tests {
+    use super::*;
+
+    #[test]
+    fn each_channel_is_told_without_flooding() {
+        let mut a = Announcements::default();
+        let t0 = Instant::now();
+        let at = |s: u64| t0 + Duration::from_secs(s);
+        assert_eq!(a.decide("A".into(), at(0)), Announce::Now);
+        assert_eq!(a.decide("A".into(), at(60)), Announce::Skip, "A knows");
+        // Moved to B within the gap: told when the gap is over.
+        assert_eq!(a.decide("B".into(), at(70)), Announce::Now);
+        assert_eq!(
+            a.decide("C".into(), at(75)),
+            Announce::Later(Duration::from_secs(10))
+        );
+        assert_eq!(
+            a.decide("D".into(), at(77)),
+            Announce::Skip,
+            "one timer; D replaces C"
+        );
+        assert_eq!(a.due().as_deref(), Some("D"));
+        assert_eq!(a.decide("D".into(), at(85)), Announce::Now);
+        // A, B and D know; back in A within 30 min: nothing.
+        assert_eq!(a.decide("A".into(), at(200)), Announce::Skip);
+        assert_eq!(
+            a.decide("A".into(), at(60 * 31)),
+            Announce::Now,
+            "told again later"
+        );
+        // Back to a channel that knows while one waits: the waiting one is dropped.
+        let mut b = Announcements::default();
+        assert_eq!(b.decide("A".into(), at(0)), Announce::Now);
+        assert!(matches!(b.decide("B".into(), at(1)), Announce::Later(_)));
+        assert_eq!(b.decide("A".into(), at(2)), Announce::Skip);
+        assert_eq!(b.due(), None);
+        assert!(b.knows(&"A".into(), at(3)) && !b.knows(&"B".into(), at(3)));
+        b.failed(&"A".into());
+        assert!(
+            !b.knows(&"A".into(), at(3)),
+            "a failed announcement does not count"
+        );
+        assert_eq!(b.decide("A".into(), at(20)), Announce::Now);
+    }
+}
+
+#[cfg(test)]
 mod speech_settings_tests {
     use super::SpeechSettings;
 
@@ -335,6 +382,10 @@ enum Control {
 }
 
 enum Internal {
+    /// A delayed announcement that the bot listens is due (see [`Announcements`]).
+    AnnounceDue,
+    /// The announcement in this channel could not be sent.
+    AnnounceFailed { channel: PlatformId },
     /// A client said something (speech recognition).
     Heard {
         client: Box<Client>,
@@ -763,7 +814,7 @@ pub(crate) fn spawn(
         next_speech: 0,
         failure_log: james_core::logs::RateLimiter::new(10, Duration::from_secs(60)),
         speech_tasks,
-        announced: false,
+        announcements: Announcements::default(),
     };
     let join = tokio::spawn(
         task.run(control_rx, internal_rx, platform_events_rx, engine_events_rx)
@@ -806,7 +857,10 @@ fn listen(
                 let channel = snapshot.clients.iter().find(|c| c.id == own)?.channel.clone();
                 // Only people in the bot's channel (whose voice it hears).
                 snapshot.clients.into_iter().find(|c| {
-                    c.id == id && !c.is_self && c.channel == channel && !bots.read().contains(&c.uid)
+                    c.id == id
+                        && !c.is_self
+                        && c.channel == channel
+                        && !bots.read().values().any(|uid| *uid == c.uid)
                 })
             })
         })
@@ -839,6 +893,77 @@ fn listen(
     });
     (Some(voice_tx), vec![listener, forwarder])
 }
+
+/// When the channels the bot is in are told that it listens: each channel once (again after
+/// [`ANNOUNCE_AGAIN`]), announcements at least [`ANNOUNCE_GAP`] apart; one that has to wait is
+/// sent when the gap is over, to the channel the bot is in by then. Moving the bot around can
+/// neither keep a channel from being told nor make the bot flood the server.
+#[derive(Default)]
+struct Announcements {
+    told: HashMap<PlatformId, Instant>,
+    last: Option<Instant>,
+    /// The channel waiting for the gap to end.
+    pending: Option<PlatformId>,
+    /// A delayed announcement is scheduled.
+    scheduled: bool,
+}
+
+#[derive(Debug, PartialEq)]
+enum Announce {
+    Skip,
+    Now,
+    Later(Duration),
+}
+
+impl Announcements {
+    fn decide(&mut self, channel: PlatformId, now: Instant) -> Announce {
+        if self
+            .told
+            .get(&channel)
+            .is_some_and(|at| now.duration_since(*at) < ANNOUNCE_AGAIN)
+        {
+            // Back in a channel that knows: nothing waits any more.
+            self.pending = None;
+            return Announce::Skip;
+        }
+        if let Some(last) = self.last.filter(|last| now.duration_since(*last) < ANNOUNCE_GAP) {
+            self.pending = Some(channel);
+            if self.scheduled {
+                return Announce::Skip;
+            }
+            self.scheduled = true;
+            return Announce::Later(ANNOUNCE_GAP - now.duration_since(last));
+        }
+        self.told.retain(|_, at| now.duration_since(*at) < ANNOUNCE_AGAIN);
+        self.told.insert(channel, now);
+        self.last = Some(now);
+        self.pending = None;
+        Announce::Now
+    }
+
+    /// Whether the people in `channel` were told (speech from elsewhere is not used).
+    fn knows(&self, channel: &PlatformId, now: Instant) -> bool {
+        self.told
+            .get(channel)
+            .is_some_and(|at| now.duration_since(*at) < ANNOUNCE_AGAIN)
+    }
+
+    /// The announcement in `channel` could not be sent: it is not told.
+    fn failed(&mut self, channel: &PlatformId) {
+        self.told.remove(channel);
+    }
+
+    /// The channel to announce now that the gap is over.
+    fn due(&mut self) -> Option<PlatformId> {
+        self.scheduled = false;
+        self.pending.take()
+    }
+}
+
+/// A channel is told again that the bot listens after this long.
+const ANNOUNCE_AGAIN: Duration = Duration::from_secs(30 * 60);
+/// Announcements are at least this far apart.
+const ANNOUNCE_GAP: Duration = Duration::from_secs(15);
 
 /// Recognised speech older than this is not acted on.
 const SPEECH_MAX_AGE: Duration = Duration::from_secs(30);
@@ -974,8 +1099,8 @@ struct InstanceTask {
     failure_log: james_core::logs::RateLimiter,
     /// Speech recognition of this instance, stopped with it (queued utterances are dropped).
     speech_tasks: Vec<JoinHandle<()>>,
-    /// The channel was told that the bot listens.
-    announced: bool,
+    /// Which channels were told that the bot listens.
+    announcements: Announcements,
 }
 
 impl InstanceTask {
@@ -1386,6 +1511,12 @@ impl InstanceTask {
     fn handle_internal(&mut self, internal: Internal) {
         match internal {
             Internal::Heard { client, transcript } => self.heard(*client, transcript),
+            Internal::AnnounceFailed { channel } => self.announcements.failed(&channel),
+            Internal::AnnounceDue => {
+                if let Some(channel) = self.announcements.due() {
+                    self.announce_listening(channel);
+                }
+            }
             Internal::Synthesized { id, result } => {
                 // Cancelled meanwhile: the result (and its audio file) is dropped.
                 if self.synthesizing.remove(&id).is_none() {
@@ -1514,18 +1645,34 @@ impl InstanceTask {
     }
 
     fn handle_platform(&mut self, event: PlatformEvent) {
+        // The bot moved to another channel: the people there are told that it listens.
+        if let PlatformEvent::ClientMove {
+            client,
+            from,
+            to: Some(to),
+            ..
+        } = &event
+        {
+            if client.is_self && from.as_ref() != Some(to) {
+                self.announce_listening(to.clone());
+            }
+        }
         match &event {
             PlatformEvent::Connected { snapshot } => {
                 self.connected = true;
                 self.last_error = None;
                 let own = snapshot.own_client.as_ref();
                 if let Some(me) = snapshot.clients.iter().find(|c| Some(&c.id) == own) {
-                    self.services.bot_uids.write().insert(me.uid.clone());
-                }
-                // Once per start (not on every reconnect).
-                if self.config.speech.enabled && !self.speech_tasks.is_empty() && !self.announced {
-                    self.announced = true;
-                    self.announce_listening();
+                    // Replaces an older identity of this instance (e.g. after an import).
+                    if !me.uid.is_empty() {
+                        self.services
+                            .bot_uids
+                            .write()
+                            .insert(self.config.id.clone(), me.uid.clone());
+                    }
+                    if let Some(channel) = me.channel.clone() {
+                        self.announce_listening(channel);
+                    }
                 }
                 self.emit(InstanceEvent::Connected {
                     snapshot: Box::new(snapshot.clone()),
@@ -1590,20 +1737,47 @@ impl InstanceTask {
         });
     }
 
-    /// Tells the bot's channel that it listens (people are not asked otherwise).
-    fn announce_listening(&self) {
-        let handle = self.handle.clone();
-        spawn_here(async move {
-            let text = "Speech recognition is on: what is said in this channel is turned into text.";
-            if let Err(e) = handle.send_message(MessageTarget::Channel, None, text).await {
-                tracing::debug!(error = %e, "cannot announce speech recognition");
+    /// Tells the bot's channel that it listens (people are not asked otherwise); see
+    /// [`Announcements`] for how often.
+    fn announce_listening(&mut self, channel: PlatformId) {
+        // Only while it really listens, and is connected (`Connected` announces again).
+        if !self.connected || !self.config.speech.enabled || self.speech_tasks.iter().all(|t| t.is_finished())
+        {
+            return;
+        }
+        match self.announcements.decide(channel.clone(), Instant::now()) {
+            Announce::Skip => {}
+            Announce::Now => {
+                let (handle, internal) = (self.handle.clone(), self.internal.clone());
+                spawn_here(async move {
+                    let text = "Speech recognition is on: what is said in this channel is turned into text.";
+                    if let Err(e) = handle.send_message(MessageTarget::Channel, None, text).await {
+                        tracing::warn!(error = %e, "cannot announce speech recognition");
+                        let _ = internal.send(Internal::AnnounceFailed { channel });
+                    }
+                });
             }
-        });
+            Announce::Later(wait) => {
+                let internal = self.internal.clone();
+                spawn_here(async move {
+                    tokio::time::sleep(wait).await;
+                    let _ = internal.send(Internal::AnnounceDue);
+                });
+            }
+        }
     }
 
     /// Something a client said: to plugins (and web clients that may read chat), and run as a
     /// command if it starts with the wake word.
     fn heard(&mut self, client: Client, transcript: james_core::stt::Transcript) {
+        // Only from channels whose people were told that the bot listens.
+        let told = client
+            .channel
+            .as_ref()
+            .is_some_and(|c| self.announcements.knows(c, Instant::now()));
+        if !told {
+            return;
+        }
         tracing::debug!(chars = transcript.text.chars().count(), "speech recognised");
         let command = self.config.speech.wake_word.as_deref().and_then(|wake| {
             let spoken = crate::speech::spoken_command(&crate::speech::wake_command(&transcript.text, wake)?);
