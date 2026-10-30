@@ -366,7 +366,7 @@
     min-width: 0;
   }
   .icon-slot {
-    width: 32px;
+    width: 30px;
     flex-shrink: 0;
   }
   @media (pointer: coarse) {

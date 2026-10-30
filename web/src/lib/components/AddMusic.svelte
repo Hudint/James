@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { rise } from '$lib/motion';
   import { api } from '$lib/api';
   import { formatDuration, trackLabel } from '$lib/format';
   import { t } from '$lib/i18n/index.svelte';
@@ -132,19 +133,23 @@
     </div>
     <p id="add-hint" class="hint">{t('player.searchHint')}</p>
     <div class="row">
-      <button class="btn btn-primary" type="submit" disabled={!input.trim() || busy !== null}>
+      <button class="btn btn-primary btn-small" type="submit" disabled={!input.trim() || busy !== null}>
         <Icon name="plus" size={16} />{busy === 'append' ? t('common.loading') : t('player.addToQueue')}
       </button>
-      <button class="btn" type="button" onclick={() => add('next')} disabled={!input.trim() || busy !== null}>
-        {busy === 'next' ? t('common.loading') : t('player.playNext')}
-      </button>
-      <button class="btn" type="button" onclick={() => add('now')} disabled={!input.trim() || busy !== null}>
-        <Icon name="play" size={16} />{busy === 'now' ? t('common.loading') : t('player.playNow')}
-      </button>
-      {#if !isUrl(input.trim())}
-        <button class="btn btn-ghost" type="button" onclick={search} disabled={!input.trim() || busy !== null}>
-          <Icon name="search" size={16} />{busy === 'search' ? t('player.searching') : t('common.search')}
-        </button>
+      {#if input.trim()}
+        <span class="more-actions" in:rise={{ y: 4 }}>
+          <button class="btn btn-small" type="button" onclick={() => add('next')} disabled={busy !== null}>
+            {busy === 'next' ? t('common.loading') : t('player.playNext')}
+          </button>
+          <button class="btn btn-small" type="button" onclick={() => add('now')} disabled={busy !== null}>
+            <Icon name="play" size={16} />{busy === 'now' ? t('common.loading') : t('player.playNow')}
+          </button>
+          {#if !isUrl(input.trim())}
+            <button class="btn btn-small btn-ghost" type="button" onclick={search} disabled={busy !== null}>
+              <Icon name="search" size={16} />{busy === 'search' ? t('player.searching') : t('common.search')}
+            </button>
+          {/if}
+        </span>
       {/if}
     </div>
     {/if}
@@ -216,6 +221,11 @@
 </section>
 
 <style>
+  .more-actions {
+    display: inline-flex;
+    flex-wrap: wrap;
+    gap: var(--space-2);
+  }
   .add {
     display: flex;
     flex-direction: column;

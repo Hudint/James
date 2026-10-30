@@ -202,7 +202,7 @@
       <div class="field" style:margin-left="{(field.indent ?? 0) * 16}px">
         {#if field.type === 'checkbox'}
           <label class="checkbox" for={id}>
-            <input {id} type="checkbox" checked={!!value(field)} onchange={(e) => set(field, e.currentTarget.checked)} />
+            <input {id} type="checkbox" class="switch" role="switch" checked={!!value(field)} onchange={(e) => set(field, e.currentTarget.checked)} />
             {field.title ?? field.name}
           </label>
         {:else}

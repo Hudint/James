@@ -124,6 +124,5 @@
   .sso {
     width: 100%;
     justify-content: center;
-    background: var(--surface-2);
   }
 </style>

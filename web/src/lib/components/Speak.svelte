@@ -67,7 +67,7 @@
   <form class="stack-sm" onsubmit={say}>
     <div class="head">
       <label id="speak-label" for="speak-input" class="label">{t('speak.label')}</label>
-      {#if speaking}<span class="badge accent" aria-hidden="true">{t('speak.speaking')}</span>{/if}
+      {#if speaking}<span class="badge live" aria-hidden="true">{t('speak.speaking')}</span>{/if}
       <!-- Always present, so screen readers announce the change. -->
       <span class="sr-only" role="status">{speaking ? t('speak.speaking') : ''}</span>
     </div>

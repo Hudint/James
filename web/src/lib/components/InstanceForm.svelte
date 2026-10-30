@@ -171,7 +171,7 @@
     <div class="form-grid">
       <div class="field">
         <label for="cfg-volume">{t('config.volume')}: {new Intl.NumberFormat(i18n.locale, { style: 'percent' }).format(config.audio.volume / 100)}</label>
-        <input id="cfg-volume" type="range" min="0" max="100" bind:value={config.audio.volume} />
+        <input id="cfg-volume" type="range" min="0" max="100" bind:value={config.audio.volume} style:--p="{config.audio.volume}%" />
       </div>
       <div class="field">
         <label for="cfg-bitrate">{t('config.bitrate')}</label>

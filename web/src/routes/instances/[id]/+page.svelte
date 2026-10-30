@@ -126,7 +126,7 @@
           {:else if !status.connected}
             <span class="badge warning"><span class="dot"></span>{t('instance.connecting')}</span>
           {:else if status.current && !status.paused}
-            <span class="badge accent"><span class="dot"></span>{t('dashboard.playing')}</span>
+            <span class="badge live"><span class="dot"></span>{t('dashboard.playing')}</span>
           {:else if status.current}
             <span class="badge"><span class="dot"></span>{t('dashboard.paused')}</span>
           {:else}
@@ -155,16 +155,16 @@
           {#if manage}
             {#if status}
               <button class="btn" disabled={busy} onclick={() => lifecycle('restart')}><Icon name="refresh" size={16} />{t('instance.restart')}</button>
-              <button class="btn" disabled={busy} onclick={() => lifecycle('stop')}><Icon name="power" size={16} />{t('instance.stop')}</button>
+              <button class="btn btn-danger" disabled={busy} onclick={() => lifecycle('stop')}><Icon name="power" size={16} />{t('instance.stop')}</button>
             {:else}
               <button class="btn btn-primary" disabled={busy} onclick={() => lifecycle('start')}><Icon name="power" size={16} />{t('instance.start')}</button>
             {/if}
           {/if}
           {#if logs}
-            <a class="btn" href="/instances/{id}/logs"><Icon name="logs" size={16} />{t('logs.title')}</a>
+            <a class="btn btn-ghost" href="/instances/{id}/logs"><Icon name="logs" size={16} />{t('logs.title')}</a>
           {/if}
           {#if manage}
-            <a class="btn" href="/instances/{id}/settings"><Icon name="settings" size={16} />{t('instance.settings')}</a>
+            <a class="btn btn-ghost" href="/instances/{id}/settings"><Icon name="settings" size={16} />{t('instance.settings')}</a>
           {/if}
         </div>
       {/if}

@@ -399,6 +399,13 @@ struct LogQuery {
     after: u64,
     #[serde(default = "default_log_limit")]
     limit: usize,
+    /// Only messages of at least this level (`debug`, `info`, `warn`, `error`).
+    #[serde(default = "default_log_level")]
+    level: james_core::logs::LogLevel,
+}
+
+fn default_log_level() -> james_core::logs::LogLevel {
+    james_core::logs::LogLevel::Debug
 }
 
 fn default_log_limit() -> usize {
@@ -429,9 +436,10 @@ async fn logs(
         headers,
         Json(LogPage {
             boot: state.logs.boot(),
-            entries: state.logs.since(
+            entries: state.logs.since_level(
                 &id,
                 query.after,
+                query.level,
                 query.limit.clamp(1, james_core::logs::MAX_ENTRIES),
             ),
         }),

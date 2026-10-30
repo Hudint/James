@@ -1503,6 +1503,29 @@ async fn instance_logs_need_their_permission() {
         )
         .await;
     assert_eq!(r.body["entries"].as_array().unwrap().len(), 1);
+    let r = api
+        .call(
+            Method::GET,
+            "/instances/bot/logs?level=warn&limit=1",
+            Some(&reader),
+            None,
+        )
+        .await;
+    let entries = r.body["entries"].as_array().unwrap();
+    assert_eq!(entries.len(), 1, "the limit counts warnings only");
+    assert_eq!(entries[0]["message"], "connection failed");
+    assert_eq!(
+        api.call(Method::GET, "/instances/bot/logs?level=loud", Some(&reader), None)
+            .await
+            .status,
+        StatusCode::BAD_REQUEST
+    );
+    assert_eq!(
+        api.call(Method::GET, "/instances/bot/logs?level=warn", Some(&viewer), None)
+            .await
+            .status,
+        StatusCode::FORBIDDEN
+    );
     assert_eq!(
         api.call(Method::GET, "/instances/other/logs", Some(&reader), None)
             .await

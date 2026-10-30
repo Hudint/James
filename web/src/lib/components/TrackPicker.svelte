@@ -223,9 +223,9 @@
     gap: var(--space-2);
     padding: var(--space-1) var(--space-2) var(--space-1) var(--space-3);
     min-height: 40px;
-    border: 1px solid var(--border);
+    border: 1px solid var(--input-border);
     border-radius: var(--radius);
-    background: var(--surface-2);
+    background: var(--surface);
   }
   .chosen .title {
     flex: 1;

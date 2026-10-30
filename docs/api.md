@@ -43,7 +43,7 @@ searching) are rate-limited per account (`429`).
 | `POST /instances/{id}/say` `{text, voice?, language?}`, `POST …/say/stop` | `tts.say` | [Text to speech](tts.md): `202 {"id"}`, then `speechStarted`/`speechEnded` events; `429` when 16 texts wait |
 | `GET /tts/voices` | account | Installed voices |
 | `GET /stt` | signed in | `{available}`: whether instances can switch on speech recognition |
-| `GET /instances/{id}/logs?after=&limit=` | `instance.logs` | Recent log messages of the instance, oldest first: `[{seq, time, level, plugin, message}]`; pass the last `seq` as `after` to get only newer ones |
+| `GET /instances/{id}/logs?after=&limit=&level=` | `instance.logs` | Recent log messages of the instance, oldest first: `{boot, entries: [{seq, time, level, plugin, message}]}`; pass the last `seq` as `after` to get only newer ones, and `level` (`debug`, `info`, `warn`, `error`) for only messages of at least that level (`limit` counts those) |
 | `GET /library?q=&limit=&offset=`, `POST /library/upload`, `POST /library/scan` | `library.read` / `library.manage` | Local library |
 | `PUT /library/{id}/names {title?, artist?, album?}`, `DELETE /library/{id}/names` | `library.manage` | Edit a track's names in James (the file is not changed, rescans keep them). A missing or `null` title, any missing field, or one equal to the file's tag follows the file; `null`/`""` for artist or album means none. `DELETE` returns to the file's tags |
 | `GET/POST /playlists`, `GET/PATCH/DELETE /playlists/{id}`, `GET/PUT/POST /playlists/{id}/tracks`, `POST /playlists/{id}/play` | `playlist.read` / `playlist.manage` | Playlists |

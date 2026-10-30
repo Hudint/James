@@ -68,8 +68,10 @@
   <div class="art" aria-hidden="true">
     {#if track?.thumbnail}
       <img src={track.thumbnail} alt="" referrerpolicy="no-referrer" />
+    {:else if track}
+      <span class="meter big" class:still={!playing}><i></i><i></i><i></i></span>
     {:else}
-      <Icon name={track?.isStream ? 'radio' : 'music'} size={40} />
+      <Icon name="music" size={36} />
     {/if}
   </div>
 
@@ -104,6 +106,7 @@
         max={duration ?? 0}
         step="1000"
         value={seeking ?? position}
+        style:--p="{duration ? Math.min(100, ((seeking ?? Math.round(position / 1000) * 1000) / duration) * 100) : 0}%"
         disabled={!control || !duration}
         aria-label={t('player.seek')}
         aria-valuetext={formatDuration(seeking ?? position)}
@@ -164,6 +167,7 @@
       min="0"
       max="100"
       bind:value={volume}
+      style:--p="{volume}%"
       oninput={onVolume}
       disabled={!canVolume}
       aria-label={t('player.volume')}
@@ -189,12 +193,17 @@
     grid-area: art;
     width: 96px;
     height: 96px;
-    border-radius: var(--radius);
-    background: var(--accent-soft);
-    color: var(--accent);
+    border-radius: var(--radius-lg);
+    background: var(--side-bg);
+    color: var(--side-muted);
     display: grid;
     place-items: center;
     overflow: hidden;
+  }
+  .meter.big {
+    width: 40px;
+    height: 36px;
+    gap: 5px;
   }
   .art img {
     width: 100%;
@@ -206,10 +215,8 @@
     min-width: 0;
   }
   .label {
-    font-size: var(--text-xs);
-    text-transform: uppercase;
-    letter-spacing: 0.06em;
-    font-weight: 700;
+    font-size: var(--text-sm);
+    font-weight: 500;
     margin-bottom: var(--space-1);
   }
   .title {
@@ -243,10 +250,11 @@
     min-height: 24px;
   }
   .time {
+    font-family: var(--mono);
     font-variant-numeric: tabular-nums;
     font-size: var(--text-sm);
     color: var(--text-muted);
-    min-width: 3.5em;
+    min-width: 4em;
     text-align: center;
   }
   .controls {

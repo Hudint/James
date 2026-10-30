@@ -2,7 +2,9 @@
 
 ## Web interface
 
-- **Dashboard** – all bots with what they play.
+- **Dashboard** – all bots at a glance: their channel, listeners, what they play (with progress
+  and play/pause/skip), a field to play something on an idle bot, the plugin host's state and the
+  latest warnings from the instance logs you may read.
 - **Instance** – player (play/pause, skip, seek, volume, repeat, shuffle), queue (reorder, remove,
   jump), adding music (URL, search, library), speaking a text, and the server tree (move the bot by
   clicking a channel).
@@ -16,8 +18,10 @@
   left as in the file follow the file's tags. Tracks already in a queue or playlist keep the name they
   had when they were added, and edits are lost when the file is moved or renamed on disk.
 - **Playlists** – saved lists; play them on any instance.
-- **Plugins** – for the instance chosen at the top: activate and deactivate plugins, their
-  settings, and the permissions they get ([Plugins](plugins/README.md)).
+- **Plugins** – for the instance chosen in the toolbar: search and filter (all, active, available,
+  problems), switch plugins on and off, and open any number of them at once to see their details,
+  permissions and settings ([Plugins](plugins/README.md)). Unsaved settings stay while a plugin is
+  collapsed or filtered out; a note at the bottom leads back to them.
 - **Instance → Settings** – connection, audio, command prefix, voice, and the bot's **identity**:
   its unique ID, and an existing identity to use instead (exported from the TeamSpeak client via
   *Tools → Identities → Export*, or copied from SinusBot), so the bot keeps its server groups.

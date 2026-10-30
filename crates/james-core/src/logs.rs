@@ -3,7 +3,7 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::{Arc, Mutex, RwLock};
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 /// Messages kept per instance.
 pub const MAX_ENTRIES: usize = 2000;
@@ -14,7 +14,7 @@ pub const MAX_MESSAGE: usize = 4000;
 /// Instances with a log; messages for further ones are dropped.
 const MAX_INSTANCES: usize = 256;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum LogLevel {
     Debug,
@@ -204,6 +204,11 @@ impl InstanceLogs {
 
     /// Messages after `after` (oldest first), at most `limit` (the newest ones).
     pub fn since(&self, instance: &str, after: u64, limit: usize) -> Vec<LogEntry> {
+        self.since_level(instance, after, LogLevel::Debug, limit)
+    }
+
+    /// Like [`Self::since`], only messages of at least level `min` (the limit counts those).
+    pub fn since_level(&self, instance: &str, after: u64, min: LogLevel, limit: usize) -> Vec<LogEntry> {
         let Some(log) = self
             .logs
             .read()
@@ -214,12 +219,18 @@ impl InstanceLogs {
             return Vec::new();
         };
         let log = lock(&log);
-        let newer = log.entries.len() - log.entries.partition_point(|e| e.seq <= after);
-        log.entries
+        let start = log.entries.partition_point(|e| e.seq <= after);
+        let mut kept: Vec<LogEntry> = log
+            .entries
             .iter()
-            .skip(log.entries.len() - newer.min(limit))
+            .skip(start)
+            .rev()
+            .filter(|e| e.level >= min)
+            .take(limit)
             .cloned()
-            .collect()
+            .collect();
+        kept.reverse();
+        kept
     }
 
     /// Removes the log of a deleted instance; messages for it are ignored until [`Self::revive`].
@@ -296,6 +307,15 @@ mod tests {
         assert_eq!(tail.len(), 2);
         assert_eq!(tail[1].seq, last);
         assert_eq!(logs.since("a", last - 3, 100).len(), 3);
+        // The limit counts only the levels asked for.
+        let warnings = logs.since_level("b", 0, LogLevel::Warn, 1);
+        assert_eq!(warnings.len(), 1);
+        assert!(logs.since_level("a", 0, LogLevel::Warn, 10).is_empty());
+        let first = warnings[0].seq;
+        assert!(
+            logs.since_level("b", first, LogLevel::Warn, 10).is_empty(),
+            "after the cursor"
+        );
         let b = logs.since("b", 0, 10);
         assert_eq!(b[0].plugin.as_deref(), Some("greeter"));
         assert!(b[0].message.len() <= MAX_MESSAGE + '…'.len_utf8());

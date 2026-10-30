@@ -212,7 +212,7 @@
     {/if}
   </header>
 
-  <div class="card toolbar">
+  <div class="toolbar">
     <div class="search">
       <Icon name="search" size={18} />
       <label class="visually-hidden" for="library-search">{t('common.search')}</label>
@@ -268,7 +268,7 @@
                 </td>
                 <td class="hide-sm">{track.artist ?? '–'}</td>
                 <td class="hide-md">{track.album ?? '–'}</td>
-                <td class="num muted">{formatDuration(track.durationMs)}</td>
+                <td class="num muted mono duration">{formatDuration(track.durationMs)}</td>
                 {#if compact}
                   <td class="action">
                     <ActionMenu
@@ -361,6 +361,9 @@
 </dialog>
 
 <style>
+  .duration {
+    font-size: var(--text-sm);
+  }
   dialog .field {
     margin-top: var(--space-3);
   }

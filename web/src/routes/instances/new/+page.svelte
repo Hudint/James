@@ -40,7 +40,4 @@
 </div>
 
 <style>
-  .narrow {
-    max-width: 880px;
-  }
 </style>

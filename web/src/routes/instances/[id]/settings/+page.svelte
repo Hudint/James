@@ -116,9 +116,6 @@
 </div>
 
 <style>
-  .narrow {
-    max-width: 880px;
-  }
   .danger {
     border-color: color-mix(in srgb, var(--danger) 40%, var(--border));
   }

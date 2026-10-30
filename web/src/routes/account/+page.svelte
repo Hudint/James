@@ -193,9 +193,6 @@
 </div>
 
 <style>
-  .narrow {
-    max-width: 880px;
-  }
   .grow {
     flex: 1;
     min-width: 0;

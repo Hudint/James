@@ -104,9 +104,6 @@
 </div>
 
 <style>
-  .narrow {
-    max-width: 880px;
-  }
   .state {
     display: flex;
     align-items: center;
