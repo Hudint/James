@@ -476,6 +476,16 @@ pub struct PlatformContext {
     pub events: mpsc::UnboundedSender<PlatformEvent>,
     pub commands: mpsc::Receiver<PlatformCommand>,
     pub audio: mpsc::Receiver<OpusFrame>,
+    /// What clients say, for speech recognition (`None`: nobody listens; packets are dropped
+    /// when the receiver is behind).
+    pub voice: Option<mpsc::Sender<VoicePacket>>,
+}
+
+/// One Opus frame a client sent (20 ms); empty `data` marks the end of what it said.
+#[derive(Debug, Clone)]
+pub struct VoicePacket {
+    pub client: PlatformId,
+    pub data: Vec<u8>,
 }
 
 #[async_trait]

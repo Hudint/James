@@ -123,6 +123,12 @@ pub const PERMISSIONS: &[Permission] = &[
             "Kick, ban and move clients, change their server and channel groups and see their IP addresses",
     },
     Permission {
+        id: "listen",
+        enforced: true,
+        risk: Risk::High,
+        description: "Receive what clients say in the bot's channel (speech recognition); the plugin may store or pass it on",
+    },
+    Permission {
         id: "channels",
         enforced: true,
         risk: Risk::Medium,

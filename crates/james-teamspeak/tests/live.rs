@@ -83,6 +83,7 @@ async fn plays_audio_and_chats() {
     let (commands, commands_rx) = mpsc::channel(16);
     let (audio_tx, audio_rx) = mpsc::channel(64);
     let mut ctx = PlatformContext {
+        voice: None,
         events: events_tx,
         commands: commands_rx,
         audio: audio_rx,
@@ -330,6 +331,7 @@ async fn manages_channels_and_status() {
     let (commands, commands_rx) = mpsc::channel(16);
     let (_audio_tx, audio_rx) = mpsc::channel(4);
     let mut ctx = PlatformContext {
+        voice: None,
         events: events_tx,
         commands: commands_rx,
         audio: audio_rx,

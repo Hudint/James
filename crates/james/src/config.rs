@@ -25,6 +25,7 @@ pub struct Config {
     pub media: MediaConfig,
     pub ytdlp: YtDlpConfig,
     pub tts: TtsConfig,
+    pub stt: SttConfig,
     pub network: NetworkPolicy,
     pub plugins: PluginsConfig,
     pub auth: AuthConfig,
@@ -76,6 +77,23 @@ impl Default for TtsConfig {
             enabled: true,
             default_voice: None,
             piper: james_tts::piper::PiperConfig::default(),
+        }
+    }
+}
+
+/// Speech recognition (each instance decides whether it listens).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct SttConfig {
+    pub enabled: bool,
+    pub whisper: james_stt::whisper::WhisperConfig,
+}
+
+impl Default for SttConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            whisper: james_stt::whisper::WhisperConfig::default(),
         }
     }
 }
@@ -152,6 +170,7 @@ impl Default for Config {
             media: MediaConfig::default(),
             ytdlp: YtDlpConfig::default(),
             tts: TtsConfig::default(),
+            stt: SttConfig::default(),
             network: NetworkPolicy::default(),
             plugins: PluginsConfig::default(),
             auth: AuthConfig::default(),

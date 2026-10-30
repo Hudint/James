@@ -126,6 +126,9 @@ async fn run(
     if config.tts.enabled {
         setup_tts(&config, &services, &work_dir);
     }
+    if config.stt.enabled {
+        setup_stt(&config, &services);
+    }
     let links = LinkCodes::default();
     james_runtime::builtin::register(&services.commands);
     integration::register_link_command(&services.commands, db.clone(), links.clone());
@@ -219,6 +222,22 @@ async fn run(
     }
     manager.stop_all().await;
     Ok(())
+}
+
+/// Registers speech recognition (Whisper) if a model is installed.
+fn setup_stt(config: &Config, services: &Services) {
+    let mut whisper = config.stt.whisper.clone();
+    if whisper.model.is_relative() {
+        whisper.model = config.data_dir.join(&whisper.model);
+    }
+    match james_stt::whisper::WhisperProvider::new(whisper) {
+        Ok(provider) => {
+            tracing::info!("speech recognition ready");
+            services.stt.write().register(provider);
+        }
+        // Optional: instances that want it say so when they start.
+        Err(e) => tracing::info!(reason = %format!("{e:#}"), "speech recognition is not available"),
+    }
 }
 
 /// Registers the Piper voices (and loads the default voice in the background).

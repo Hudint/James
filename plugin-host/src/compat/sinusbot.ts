@@ -997,6 +997,9 @@ function subscribe(ctx: Context, bot: Bot, name: string, cb: Function): void {
     case 'clientKickedFromChannel':
       on('clientMove', (p) => (p.reason === 'kicked' ? [moveInfo(p, p.from, p.to)] : null));
       return;
+    case 'speech':
+      on('speechRecognized', (p) => [{ client: client(p.client), text: p.text }]);
+      return;
     case 'clientNick':
       on('clientNick', (p) => [client(p.client), p.oldName]);
       return;

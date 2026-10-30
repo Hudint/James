@@ -985,11 +985,12 @@ async fn users(ctx: &Ctx<'_>, method: &str, params: Value) -> Result<Value> {
 /// Grants that make an account administrative (managing users, plugins or instances, or
 /// reading private chat or instance logs).
 fn privileged(grants: &[james_db::permissions::Grant]) -> bool {
-    const ADMINISTRATIVE: [&str; 5] = [
+    const ADMINISTRATIVE: [&str; 6] = [
         "users.manage",
         "plugins.manage",
         "instance.manage",
         "instance.logs",
+        "instance.speech",
         "server.chat.read",
     ];
     grants.iter().any(|g| {

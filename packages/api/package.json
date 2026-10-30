@@ -1,6 +1,6 @@
 {
   "name": "@james/api",
-  "version": "0.7.0",
+  "version": "0.8.0",
   "description": "Types and helpers for James plugins",
   "license": "MIT",
   "type": "module",

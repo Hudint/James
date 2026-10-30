@@ -16,7 +16,7 @@ use futures::prelude::*;
 use james_core::audio::OpusFrame;
 use james_core::platform::{
     Capabilities, MessageTarget, PlatformAdapter, PlatformCommand, PlatformContext, PlatformEvent,
-    PlatformFactory, Reply,
+    PlatformFactory, Reply, VoicePacket,
 };
 use serde::{Deserialize, Serialize};
 use tsclientlib::messages::c2s;
@@ -533,6 +533,22 @@ impl Session {
                     let _ = reply.send(result.map_err(|e| anyhow!("{e}")));
                 }
                 self.finish_creates(con);
+            }
+            StreamItem::Audio(packet) => {
+                if let Some(voice) = &ctx.voice {
+                    if let AudioData::S2C {
+                        from, codec, data, ..
+                    } = packet.data().data()
+                    {
+                        if matches!(codec, CodecType::OpusVoice | CodecType::OpusMusic) {
+                            // Dropped when recognition is behind: speech keeps coming.
+                            let _ = voice.try_send(VoicePacket {
+                                client: from.to_string(),
+                                data: data.to_vec(),
+                            });
+                        }
+                    }
+                }
             }
             StreamItem::AudioChange(tsclientlib::AudioEvent::CanSendAudio(can)) => {
                 tracing::debug!(can, "can send audio changed");

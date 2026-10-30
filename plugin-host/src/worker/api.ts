@@ -245,6 +245,7 @@ export function installEvents(ctx: Context): void {
     playbackChange: (p) => p,
     speechStart: (p) => p,
     speechEnd: (p) => p,
+    speechRecognized: (p) => ({ text: p.text, language: p.language, client: wrapClient(ctx, ctx.state.client(p.clientId) ?? p.client) }),
   };
   for (const name of ['clientBack', 'clientMute', 'clientUnmute', 'clientDeaf', 'clientUndeaf', 'clientRecord', 'clientRecordStop']) {
     map[name] = (p) => ({ client: client(p.clientId) });

@@ -31,6 +31,10 @@ pub struct Services {
     pub http_proxy: Option<String>,
     /// Text-to-speech voices.
     pub tts: Arc<RwLock<james_core::tts::TtsRegistry>>,
+    /// Speech recognition providers.
+    pub stt: Arc<RwLock<james_core::stt::SttRegistry>>,
+    /// Identities of all instances' bots (their voices are not listened to).
+    pub bot_uids: Arc<RwLock<std::collections::HashSet<String>>>,
 }
 
 impl Services {
@@ -51,6 +55,8 @@ impl Services {
             ffmpeg: ffmpeg.into(),
             http_proxy: None,
             tts: Arc::default(),
+            stt: Arc::default(),
+            bot_uids: Arc::default(),
         }
     }
 }

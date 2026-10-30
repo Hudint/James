@@ -230,6 +230,7 @@ bot.once('connect', () => …);
 | `queueChange` | `{ queue }` | The queue changed. |
 | `playbackChange` | `{ status }` | Pause, volume, repeat, position jumps, … |
 | `speechStart` / `speechEnd` | `{ id, text }` / `{ id, error, stopped }` | Text to speech started / ended. |
+| `speechRecognized` | `{ text, language, client }` | A client said something in the bot's channel (needs the `listen` permission and speech recognition switched on for the instance; other bots are not listened to). SinusBot scripts get it as `speech`. |
 | `ws.connect` / `ws.message` / `ws.close` | `{ connection, user, data }` | WebSocket of the plugin's web page ([web](#web-pages-and-http)). |
 | `custom:<name>` | `{ name, data, from }` | Custom event sent with `bot.emit(name, data)` by any plugin. |
 
@@ -426,6 +427,7 @@ the plugin (`fetch` with the `http` permission) and hand it to the page through 
 | Permission | Allows | Enforced by |
 |---|---|---|
 | `moderation` | Kick, ban and move clients, change server and channel groups, see client IP addresses | James |
+| `listen` | Receive what clients say in the bot's channel (speech recognition); a plugin may store or pass it on | James |
 | `channels` | Create, edit, move and delete channels | James |
 | `playlists` | Create, change and delete saved playlists | James |
 | `instances` | Start, stop and inspect all instances (also act on instances the plugin is not active on) | James |

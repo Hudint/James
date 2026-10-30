@@ -77,6 +77,23 @@ complete file.
 | `piper.max_workers` | `3` | Voices kept loaded and texts synthesized at once (each voice needs ~100–200 MB of memory; the default voice may come on top) |
 | `piper.idle_timeout_secs` | `600` | Unused voices are unloaded after this time (the default voice stays loaded) |
 
+## `[stt]`
+
+Speech recognition: instances that switch it on (instance settings) recognise what clients say in
+the bot's channel with [faster-whisper](https://github.com/SYSTRAN/faster-whisper), on this server.
+The Docker image includes the multilingual Whisper *base* model.
+
+| Key | Default | Meaning |
+|---|---|---|
+| `enabled` | `true` | Speech recognition available (if a model is installed) |
+| `whisper.python` | `python3` | Python with the `faster-whisper` package |
+| `whisper.model` | `models/whisper-base` | Directory of a faster-whisper (CTranslate2) model, e.g. from [Systran/faster-whisper-base](https://huggingface.co/Systran/faster-whisper-base) (relative to `data_dir`); larger models (`small`) recognise better and need more CPU |
+| `whisper.threads` | `2` | CPU threads used (base: about as long as the utterance on two cores) |
+| `whisper.idle_timeout_secs` | `600` | The model (~200 MB of memory) is unloaded after this time without speech |
+
+Utterances end at a pause (0.7 s) and are at most 15 s long; while recognition is busy, further
+utterances are dropped rather than queued.
+
 ## `[plugins]`
 
 | Key | Default | Meaning |
@@ -119,6 +136,7 @@ Set in the web interface (**Instance → Settings**) or via the API:
 | Voice | Voice for text to speech |
 | Now playing in description | Shows the current track in the bot's description |
 | Start automatically | Connects when James starts |
+| Speech recognition | Listen to the clients in the bot's channel (off by default; changing it needs the `instance.speech` permission and is logged), the language they speak (detecting it is slower) and a wake word for voice commands. James stores neither audio nor text; recognised text goes to plugins with the `listen` permission (which may store it) and, as a chat-like event, to web users who may read private chat. When the bot connects it says in its channel that speech recognition is on, but people are not asked: tell them. Other bots (all of James' instances) and continuous sound such as music are not listened to |
 
 On TeamSpeak the bot subscribes to every channel it may when it connects, as the TeamSpeak client
 does, so the web interface and plugins see the clients in all of them (not only in the bot's own

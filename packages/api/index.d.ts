@@ -142,12 +142,12 @@ export interface Manifest {
 export type Platform = 'teamspeak' | 'discord';
 
 /**
- * Permissions. `moderation`, `channels`, `playlists`, `instances`, `users` and `web` are
+ * Permissions. `moderation`, `listen`, `channels`, `playlists`, `instances`, `users` and `web` are
  * enforced by James; `fs` and `process` by the plugin's process sandbox (Node's permission
  * model). `http`, `net` and `db` only guard the corresponding Node.js modules; plugins are
  * trusted code, so these are a safety net, not a sandbox.
  */
-export type Permission = 'moderation' | 'channels' | 'playlists' | 'instances' | 'users' | 'web' | 'http' | 'net' | 'fs' | 'db' | 'process';
+export type Permission = 'moderation' | 'listen' | 'channels' | 'playlists' | 'instances' | 'users' | 'web' | 'http' | 'net' | 'fs' | 'db' | 'process';
 
 /** A setting in the web interface (same schema as SinusBot's `vars`). */
 export interface ConfigField {
@@ -560,6 +560,19 @@ export interface Events {
     error: string | null;
     /** `true` if it was cancelled before it finished. */
     stopped: boolean;
+  };
+  /**
+   * A client said something in the bot's channel (`listen`; the instance must have speech
+   * recognition switched on). Utterances end at a pause; recognition takes about as long as
+   * the utterance. Other bots are not listened to.
+   */
+  speechRecognized: {
+    /** What was recognised. */
+    text: string;
+    /** Detected or configured language (ISO 639-1, e.g. `de`); `null` if unknown. */
+    language: string | null;
+    /** The speaking client. */
+    client: Client;
   };
   /** A WebSocket connection of the plugin's web page opened (`web`). */
   'ws.connect': {

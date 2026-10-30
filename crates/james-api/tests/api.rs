@@ -1498,3 +1498,65 @@ async fn instance_logs_need_their_permission() {
         "only existing instances"
     );
 }
+
+#[tokio::test]
+async fn speech_settings_need_their_permission() {
+    let api = Api::new().await;
+    let (_, manager) = api
+        .user_with_grants(
+            "mgr",
+            &[Grant::global("instance.manage"), Grant::global("instance.view")],
+        )
+        .await;
+    let (_, admin) = api.user_with_grants("root2", &[Grant::global("*")]).await;
+    let listening = json!({"id": "bot", "platform": "fake", "speech": {"enabled": true}});
+    assert_eq!(
+        api.call(
+            Method::POST,
+            "/instances",
+            Some(&manager),
+            Some(listening.clone())
+        )
+        .await
+        .status,
+        StatusCode::FORBIDDEN
+    );
+    let quiet = json!({"id": "bot", "platform": "fake", "name": "Bot"});
+    assert_eq!(
+        api.call(Method::POST, "/instances", Some(&manager), Some(quiet.clone()))
+            .await
+            .status,
+        StatusCode::CREATED
+    );
+    assert_eq!(
+        api.call(
+            Method::PUT,
+            "/instances/bot",
+            Some(&manager),
+            Some(listening.clone())
+        )
+        .await
+        .status,
+        StatusCode::FORBIDDEN,
+        "switching it on"
+    );
+    assert_eq!(
+        api.call(
+            Method::PUT,
+            "/instances/bot",
+            Some(&admin),
+            Some(listening.clone())
+        )
+        .await
+        .status,
+        StatusCode::OK
+    );
+    let renamed = json!({"id": "bot", "platform": "fake", "name": "Renamed", "speech": {"enabled": true}});
+    assert_eq!(
+        api.call(Method::PUT, "/instances/bot", Some(&manager), Some(renamed))
+            .await
+            .status,
+        StatusCode::OK,
+        "other changes need no speech permission"
+    );
+}

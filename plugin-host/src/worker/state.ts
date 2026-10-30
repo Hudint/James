@@ -130,6 +130,9 @@ export class InstanceState {
         return [['speechStart', { id: envelope.id, text: envelope.text }]];
       case 'speechEnded':
         return [['speechEnd', { id: envelope.id, error: envelope.error ?? null, stopped: !!envelope.stopped }]];
+      case 'speechRecognized':
+        this.#remember(envelope.client);
+        return [['speechRecognized', { text: envelope.text, language: envelope.language ?? null, clientId: envelope.client.id, client: envelope.client }]];
       default:
         return [];
     }

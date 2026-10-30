@@ -55,6 +55,25 @@ Inputs: a URL (YouTube, SoundCloud, Bandcamp, radio streams, … – everything 
 direct stream), `yt: <search>` (or plain text, which searches YouTube), or a file path from the
 library.
 
+### Voice commands
+
+With speech recognition and a wake word set for an instance (instance settings), commands can be
+spoken in the bot's channel: the wake word, then the command, e.g. "James, skip" or "James, play
+Thunderstruck". German words work for the basic commands: *spiel* (play), *weiter* / *nächstes*
+(skip), *zurück* (prev), *stopp*, *anhalten* (pause), *fortsetzen* (resume), *lauter* / *leiser*.
+The speaker needs the `voice.command` permission (not part of any role by default: anyone's
+microphone may pick up a command someone else said or played) and the same permission as for the
+chat command; answers come as a private message. Only people in the bot's channel are listened to.
+Only James' playback commands can be spoken: play, add, skip, prev, stop, pause, resume, volume and
+nowplaying (not plugin commands, so that plugins without the `listen` permission never receive what
+people say, and nothing that speaks, removes or reorders, since a microphone may pick up someone
+else's command). Each speaker is recognised for at most a minute of speech per minute.
+
+Speech that only sounds like the wake word is ignored unless it is followed by a known command.
+Recognition allows one wrong letter (two in long words) and must get the first letter right, so a
+distinctive name works best; short words or names that sound like everyday words ("Jens", "Ja") are
+often missed or confused.
+
 ## Users, roles and permissions
 
 Permissions are granted through roles, globally or for single instances. Built-in roles:
@@ -82,6 +101,8 @@ Linked identities → Link identity** and send the shown `!link` code to the bot
 | `server.message` | Send chat messages as the bot |
 | `server.chat.read` | Read private chat and commands in the web interface |
 | `instance.view`, `instance.manage` | See / create, configure and delete instances |
+| `voice.command` | Give commands by voice (with speech recognition and a wake word), in addition to the command's own permission |
+| `instance.speech` | Switch speech recognition of an instance on or off and change its settings (also granted by `instance.*`) |
 | `instance.logs` | Read an instance's log (may contain chat commands and client names; also granted by `instance.*`) |
 | `library.read`, `library.manage` | Browse / upload, rename and rescan the library |
 | `playlist.read`, `playlist.manage` | See / edit playlists |

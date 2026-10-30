@@ -3,7 +3,9 @@
   import { onMount } from 'svelte';
   import { api } from '$lib/api';
   import { i18n, t } from '$lib/i18n/index.svelte';
-  import type { InstanceConfig, PlatformChannel, TtsVoice } from '$lib/types';
+  import { can } from '$lib/session.svelte';
+  import Icon from './Icon.svelte';
+  import type { InstanceConfig, PlatformChannel, SpeechSettings, TtsVoice } from '$lib/types';
 
   let {
     config = $bindable(),
@@ -55,6 +57,30 @@
 
   /** `null` until loaded. */
   let voices = $state<TtsVoice[] | null>(null);
+  /** `null` while asking the server, `undefined` if that failed. */
+  let sttAvailable = $state<boolean | null | undefined>(null);
+  $effect(() => {
+    api.stt().then((r) => (sttAvailable = r.available), () => (sttAvailable = undefined));
+  });
+  const speech = $derived(config.speech ?? { enabled: false, language: null, wake_word: null });
+  function setSpeech(change: Partial<SpeechSettings>) {
+    config.speech = { ...speech, ...change };
+  }
+  /** Same rule as the server: 1-3 words of letters, digits and hyphens. */
+  const WAKE_PATTERN = '[\\p{L}\\p{N}\\-]+( [\\p{L}\\p{N}\\-]+){0,2}';
+  const SPEECH_LANGUAGES = ['de', 'en', 'fr', 'es', 'it', 'nl', 'pl', 'tr', 'pt', 'sv', 'da', 'cs'];
+  const speechLanguages = $derived.by(() => {
+    const names = new Intl.DisplayNames([i18n.locale], { type: 'language' });
+    const codes = [...SPEECH_LANGUAGES, ...(speech.language && !SPEECH_LANGUAGES.includes(speech.language) ? [speech.language] : [])];
+    return codes.map((code) => [code, names.of(code) ?? code] as const).sort((a, b) => a[1].localeCompare(b[1], i18n.locale));
+  });
+  /** Changing speech recognition needs its own permission. */
+  const mayListen = $derived(can('instance.speech', config.id || undefined));
+  const WAKE_REGEX = new RegExp(`^(?:${WAKE_PATTERN})$`, 'v');
+  const validWake = (word: string) => word.length <= 40 && WAKE_REGEX.test(word);
+  const wakeValid = $derived(!speech.wake_word || validWake(speech.wake_word));
+  /** The name people hear: the bot's nickname. */
+  const botName = $derived(typeof config.settings?.nickname === 'string' ? (config.settings.nickname as string).trim() : '');
   onMount(() => {
     api.voices().then((v) => (voices = v), () => (voices = []));
   });
@@ -206,6 +232,71 @@
     <label class="checkbox"><input type="checkbox" bind:checked={config.autostart} />{t('config.autostart')}</label>
   </section>
 
+  <section class="card stack" aria-labelledby="cfg-speech-title">
+    <h2 id="cfg-speech-title">{t('config.speech')}</h2>
+    <div class="privacy" role="note">
+      <Icon name="alert" size={18} />
+      <p>{t('config.speechHint')}</p>
+    </div>
+    {#if !mayListen}
+      <p id="cfg-speech-state" class="hint">{t('config.speechNoPermission')}</p>
+    {:else if sttAvailable === null}
+      <p id="cfg-speech-state" class="hint">{t('config.speechChecking')}</p>
+    {:else if sttAvailable === false}
+      <p id="cfg-speech-state" class="hint">{t('config.speechUnavailable')}</p>
+    {:else if sttAvailable === undefined}
+      <p id="cfg-speech-state" class="hint">{t('config.speechUnknown')}</p>
+    {/if}
+    <label class="checkbox top">
+      <input
+        type="checkbox"
+        checked={speech.enabled}
+        disabled={!mayListen || sttAvailable === null || (sttAvailable !== true && !speech.enabled)}
+        onchange={(e) => setSpeech({ enabled: e.currentTarget.checked })}
+        aria-describedby={mayListen && sttAvailable === true ? 'cfg-speech-reconnect' : 'cfg-speech-state cfg-speech-reconnect'}
+      />
+      {t('config.speechEnabled')}
+    </label>
+    <p id="cfg-speech-reconnect" class="hint">{t('config.speechReconnect')}</p>
+    {#if speech.enabled}
+      <fieldset class="form-grid plain" disabled={!mayListen} aria-labelledby="cfg-speech-title">
+        <div class="field">
+          <label for="cfg-speech-language">{t('config.speechLanguage')}</label>
+          <select id="cfg-speech-language" value={speech.language ?? ''} onchange={(e) => setSpeech({ language: e.currentTarget.value || null })}>
+            <option value="">{t('config.speechLanguageAuto')}</option>
+            {#each speechLanguages as [code, label] (code)}<option value={code}>{label}</option>{/each}
+          </select>
+        </div>
+        <div class="field">
+          <label for="cfg-wake">{t('config.wakeWord')}</label>
+          <input
+            id="cfg-wake"
+            type="text"
+            maxlength="40"
+            pattern={WAKE_PATTERN}
+            title={t('config.wakeWordRule')}
+            value={speech.wake_word ?? ''}
+            oninput={(e) => setSpeech({ wake_word: e.currentTarget.value.trim() || null })}
+            aria-invalid={!wakeValid}
+            aria-describedby="cfg-wake-hint"
+          />
+          <span id="cfg-wake-hint" class="hint" class:error={!wakeValid}>
+            {#if !wakeValid}
+              {t('config.wakeWordRule')}
+            {:else if speech.wake_word}
+              {t('config.wakeWordHint', { wake: speech.wake_word, prefix: config.command_prefix })}
+            {:else}
+              {t('config.wakeWordOff')}
+            {/if}
+            {#if botName && botName !== speech.wake_word && validWake(botName)}
+              <button type="button" class="link-btn" onclick={() => setSpeech({ wake_word: botName })}>{t('config.wakeWordUseName', { name: botName })}</button>
+            {/if}
+          </span>
+        </div>
+      </fieldset>
+    {/if}
+  </section>
+
   <div class="savebar">
     {#if !isNew && dirty}<span class="hint">{t('config.restartHint')}</span>{/if}
     <button class="btn btn-primary" type="submit" disabled={busy || !dirty}>{busy ? t('common.saving') : isNew ? t('common.create') : t('common.save')}</button>
@@ -213,6 +304,55 @@
 </form>
 
 <style>
+  .privacy {
+    display: flex;
+    gap: var(--space-2);
+    align-items: flex-start;
+    padding: var(--space-3);
+    border-radius: var(--radius);
+    background: var(--warning-soft);
+    color: var(--text);
+    font-size: var(--text-sm);
+  }
+  .privacy :global(svg) {
+    color: var(--warning);
+    flex-shrink: 0;
+    margin-top: 2px;
+  }
+  .privacy p {
+    margin: 0;
+  }
+  fieldset.plain {
+    border: 0;
+    margin: 0;
+    padding: 0;
+    min-width: 0;
+  }
+  .checkbox.top {
+    align-items: flex-start;
+  }
+  .checkbox.top input {
+    margin-top: 3px;
+  }
+  #cfg-wake[aria-invalid='true'] {
+    border-color: var(--danger);
+  }
+  .hint.error {
+    color: var(--danger);
+  }
+  .link-btn {
+    display: inline;
+    margin-left: var(--space-1);
+    padding: 0;
+    border: 0;
+    background: none;
+    color: var(--accent);
+    font: inherit;
+    font-weight: 600;
+    text-decoration: underline;
+    text-underline-offset: 2px;
+    cursor: pointer;
+  }
   .prefix {
     max-width: 6em;
   }

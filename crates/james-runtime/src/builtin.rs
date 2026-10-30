@@ -35,6 +35,14 @@ struct Builtin {
 
 #[async_trait]
 impl Command for Builtin {
+    /// Playback controls only: a microphone may pick up someone else's command, so nothing that
+    /// speaks, removes or reorders can be spoken.
+    fn spoken(&self) -> bool {
+        matches!(
+            self.name,
+            "play" | "add" | "skip" | "prev" | "stop" | "pause" | "resume" | "volume" | "nowplaying"
+        )
+    }
     fn name(&self) -> &str {
         self.name
     }

@@ -97,6 +97,17 @@ export interface InstanceConfig {
   now_playing_description: boolean;
   autostart: boolean;
   tts_voice?: string | null;
+  speech?: SpeechSettings;
+}
+
+export interface SpeechSettings {
+  enabled: boolean;
+  /** ISO 639-1, e.g. `de`; `null` = detect. */
+  language: string | null;
+  /** Spoken commands start with this word; `null` = none. */
+  wake_word: string | null;
+  /** Speech recognition provider; `null` = the default. */
+  provider?: string | null;
 }
 
 export interface TtsVoice {

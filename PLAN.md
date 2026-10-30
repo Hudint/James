@@ -22,7 +22,7 @@ is mandatory** for the first release (tested against a TS6 Docker server). Full 
 (incl. video/screen sharing) is a later goal, so platform adapters expose *capabilities* and the
 media pipeline is designed so video tracks can be added without restructuring.
 
-**Later (architecture prepared, not implemented):** TS6 video / feature parity, Discord (M7), speech-to-text, Spotify (resolved
+**Later (architecture prepared, not implemented):** TS6 video / feature parity, Discord (M7), Spotify (resolved
 to other sources), plugin catalog, more platforms, Postgres, ARM64 image, multi-host scaling.
 
 ## Non-functional requirements
@@ -86,7 +86,7 @@ Modern modules under `@james/api` (and SinusBot-style `require('event')` etc. vi
 `event`, `engine` (logging, config, instances), `backend` (clients, channels, server groups,
 messages, pokes, kicks, moves – platform-agnostic with platform-specific extensions), `media`
 (playback, queue, playlists, yt-dlp, streams, library), `audio` (volume, mute, ducking;
-recording/STT hooks later), `tts`, `store` (persistent KV per plugin/instance/global), `db`,
+speech recognition: `speech` event, done in 0.8 with Whisper), `tts`, `store` (persistent KV per plugin/instance/global), `db`,
 `http`/`fetch`, `net` (TCP/UDP), `ws` (WebSocket channel to the web UI), `fs` (scoped), `crypto`,
 `helpers`, `graphics`, `commands` (chat commands with arguments, permissions, help), `web`
 (plugin settings form + custom web UI pages), `sources`/`tts` providers (plugins can register

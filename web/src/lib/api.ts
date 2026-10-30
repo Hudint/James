@@ -224,6 +224,7 @@ export const api = {
     request<QueueItem[]>("POST", `/playlists/${id}/play`, { instance, mode }),
 
   voices: () => request<TtsVoice[]>("GET", "/tts/voices"),
+  stt: () => request<{ available: boolean }>("GET", "/stt"),
   say: (id: string, text: string) =>
     request<{ id: number }>("POST", `/instances/${enc(id)}/say`, { text }),
   stopSpeech: (id: string) =>

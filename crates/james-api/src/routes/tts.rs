@@ -1,4 +1,4 @@
-//! Text to speech: voices and speaking on an instance.
+//! Text to speech (voices, speaking on an instance) and whether speech recognition is available.
 
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
@@ -18,12 +18,18 @@ use crate::AppState;
 pub fn routes() -> Router<AppState> {
     Router::new()
         .route("/tts/voices", get(voices))
+        .route("/stt", get(stt))
         .route("/instances/{id}/say", post(say))
         .route("/instances/{id}/say/stop", post(stop))
 }
 
 async fn voices(State(state): State<AppState>, _auth: Auth) -> Json<Vec<Voice>> {
     Json(state.manager.services().tts.read().voices())
+}
+
+/// Whether instances can listen (a speech recognition model is installed).
+async fn stt(State(state): State<AppState>, _auth: Auth) -> Json<Value> {
+    Json(json!({ "available": !state.manager.services().stt.read().is_empty() }))
 }
 
 #[derive(Deserialize)]

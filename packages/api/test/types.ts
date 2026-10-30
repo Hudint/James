@@ -5,6 +5,11 @@ import { definePlugin, type Bot, type PluginDefinition } from '@james/api';
 const untyped = definePlugin({
   setup(bot) {
     const value: unknown = bot.config.anything;
+    bot.on('speechRecognized', ({ text, language, client }) => {
+      const heard: string = text;
+      const lang: string | null = language;
+      void [heard, lang, client.name];
+    });
     // @ts-expect-error unknown is not a string
     const text: string = bot.config.anything;
     void value;

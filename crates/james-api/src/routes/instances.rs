@@ -146,6 +146,7 @@ async fn create(
 ) -> ApiResult<(StatusCode, Json<InstanceSummary>)> {
     auth.require("instance.manage", None)?;
     validate_id(&config.id)?;
+    speech_change(&auth, &config.id, &Default::default(), &config.speech)?;
     let db = state.db.clone();
     let logs = state.logs.clone();
     state
@@ -169,6 +170,8 @@ async fn update(
 ) -> ApiResult<Json<InstanceSummary>> {
     auth.require("instance.manage", Some(&id))?;
     config.id = id.clone();
+    let current = state.manager.config(&id).map(|c| c.speech).unwrap_or_default();
+    speech_change(&auth, &id, &current, &config.speech)?;
     let db = state.db.clone();
     state
         .manager
@@ -178,6 +181,27 @@ async fn update(
         .await
         .map_err(configure_error)?;
     Ok(Json(summary(&auth, &state, config).await))
+}
+
+/// Listening to what people say needs its own permission, and every change is logged.
+fn speech_change(
+    auth: &Auth,
+    id: &str,
+    current: &james_runtime::SpeechSettings,
+    new: &james_runtime::SpeechSettings,
+) -> ApiResult<()> {
+    if current == new {
+        return Ok(());
+    }
+    auth.require("instance.speech", Some(id))?;
+    tracing::info!(
+        instance = %id,
+        user = ?auth.user.username,
+        enabled = new.enabled,
+        wake_word = ?new.wake_word,
+        "speech recognition settings changed"
+    );
+    Ok(())
 }
 
 async fn remove(State(state): State<AppState>, auth: Auth, Path(id): Path<String>) -> ApiResult<StatusCode> {

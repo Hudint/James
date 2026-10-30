@@ -43,6 +43,11 @@ pub trait Command: Send + Sync {
     fn available(&self, _instance: &str) -> bool {
         true
     }
+    /// Whether the command may be spoken (voice commands): only James' own commands, so that
+    /// plugins without the `listen` permission never receive what people say.
+    fn spoken(&self) -> bool {
+        false
+    }
     /// Runs the command; the returned text is sent back as a reply.
     async fn run(&self, ctx: &CommandContext) -> anyhow::Result<Option<String>>;
 }
@@ -131,6 +136,12 @@ impl CommandRegistry {
 
     pub fn set_permission_checker(&self, checker: Arc<dyn PermissionChecker>) {
         *self.permissions.write() = checker;
+    }
+
+    /// Whether `client` has `permission` on the instance.
+    pub async fn allowed(&self, instance: &InstanceHandle, client: &Client, permission: &str) -> bool {
+        let checker = self.permissions.read().clone();
+        checker.allowed(instance, client, permission).await
     }
 
     pub fn get(&self, name: &str) -> Option<Arc<dyn Command>> {

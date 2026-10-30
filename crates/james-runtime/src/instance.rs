@@ -16,7 +16,7 @@ use std::time::{Duration, Instant};
 use anyhow::{anyhow, Context};
 use james_audio::{EngineConfig, EngineEvent, PlayRequest, SpeechRequest};
 use james_core::platform::{
-    Client, MessageTarget, PlatformCommand, PlatformContext, PlatformEvent, PlatformId, Snapshot,
+    Client, MessageTarget, PlatformCommand, PlatformContext, PlatformEvent, PlatformId, Snapshot, VoicePacket,
 };
 use james_core::source::{MediaInput, Track};
 use serde::{Deserialize, Serialize};
@@ -44,6 +44,8 @@ pub struct InstanceConfig {
     pub autostart: bool,
     /// Voice for text to speech (`None` = the default voice).
     pub tts_voice: Option<String>,
+    /// Speech recognition: what clients say in the bot's channel.
+    pub speech: SpeechSettings,
 }
 
 impl InstanceConfig {
@@ -56,7 +58,8 @@ impl InstanceConfig {
         if self.name.trim().is_empty() || self.name.chars().count() > 64 {
             anyhow::bail!("the name must be 1-64 characters");
         }
-        self.audio.validate()
+        self.audio.validate()?;
+        self.speech.validate()
     }
 }
 
@@ -89,7 +92,78 @@ impl Default for InstanceConfig {
             now_playing_description: true,
             autostart: true,
             tts_voice: None,
+            speech: SpeechSettings::default(),
         }
+    }
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct SpeechSettings {
+    /// Listen to the clients in the bot's channel (off by default: they are not asked).
+    pub enabled: bool,
+    /// Language spoken (ISO 639-1, e.g. `de`); `None` = detect it each time (slower).
+    pub language: Option<String>,
+    /// Spoken commands start with this word, e.g. "James, skip" (`None` = no voice commands).
+    pub wake_word: Option<String>,
+    /// Speech recognition provider (`None` = the default).
+    pub provider: Option<String>,
+}
+
+impl SpeechSettings {
+    pub fn validate(&self) -> anyhow::Result<()> {
+        if let Some(language) = &self.language {
+            if !james_core::stt::LANGUAGES.contains(&language.as_str()) {
+                anyhow::bail!("the speech language must be a two-letter code such as 'de'");
+            }
+        }
+        if let Some(word) = &self.wake_word {
+            let words = word.split_whitespace().count();
+            if !(1..=3).contains(&words)
+                || word.chars().count() > 40
+                || !word
+                    .chars()
+                    .all(|c| c.is_alphanumeric() || c.is_whitespace() || c == '-')
+            {
+                anyhow::bail!("the wake word must be 1-3 words of letters and digits");
+            }
+        }
+        if let Some(provider) = &self.provider {
+            if provider.is_empty()
+                || provider.len() > 32
+                || !provider.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-')
+            {
+                anyhow::bail!("unknown speech recognition provider");
+            }
+        }
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod speech_settings_tests {
+    use super::SpeechSettings;
+
+    #[test]
+    fn validation() {
+        let ok = |language: Option<&str>, wake: Option<&str>| {
+            SpeechSettings {
+                enabled: true,
+                language: language.map(Into::into),
+                wake_word: wake.map(Into::into),
+                provider: None,
+            }
+            .validate()
+            .is_ok()
+        };
+        assert!(ok(Some("de"), Some("James")));
+        assert!(ok(None, Some("Hey Jöns-Bot")));
+        assert!(!ok(Some("deu"), None));
+        assert!(!ok(Some("DE"), None));
+        assert!(!ok(Some("xx"), None), "not a language Whisper knows");
+        assert!(!ok(None, Some("Hey, James!")));
+        assert!(!ok(None, Some("James\u{202E}")));
+        assert!(!ok(None, Some("a b c d")));
     }
 }
 
@@ -186,6 +260,12 @@ pub enum InstanceEvent {
         error: Option<String>,
         stopped: bool,
     },
+    /// A client said something in the bot's channel (speech recognition).
+    SpeechRecognized {
+        client: Box<Client>,
+        text: String,
+        language: Option<String>,
+    },
 }
 
 /// An event tagged with the instance it belongs to (one bus for all instances).
@@ -255,6 +335,11 @@ enum Control {
 }
 
 enum Internal {
+    /// A client said something (speech recognition).
+    Heard {
+        client: Box<Client>,
+        transcript: james_core::stt::Transcript,
+    },
     Synthesized {
         id: u64,
         result: anyhow::Result<james_core::tts::Speech>,
@@ -632,6 +717,7 @@ pub(crate) fn spawn(
         services: services.clone(),
     };
 
+    let (voice_tx, speech_tasks) = span.in_scope(|| listen(&config, &services, &handle, &internal_tx));
     let (settings_tx, settings_rx) = watch::channel(config.settings.clone());
     let adapter_task = tokio::spawn(
         run_adapter(config.id.clone(), settings_rx, factory, services.clone(), {
@@ -639,6 +725,7 @@ pub(crate) fn spawn(
                 events: platform_events_tx,
                 commands: platform_rx,
                 audio: audio_rx,
+                voice: voice_tx,
             }
         })
         .instrument(span.clone()),
@@ -675,6 +762,8 @@ pub(crate) fn spawn(
         synthesizing: HashMap::new(),
         next_speech: 0,
         failure_log: james_core::logs::RateLimiter::new(10, Duration::from_secs(60)),
+        speech_tasks,
+        announced: false,
     };
     let join = tokio::spawn(
         task.run(control_rx, internal_rx, platform_events_rx, engine_events_rx)
@@ -682,6 +771,80 @@ pub(crate) fn spawn(
     );
     Ok((handle, join))
 }
+
+/// Starts speech recognition if the instance wants it; returns where the platform sends voice
+/// and the tasks to stop with the instance.
+fn listen(
+    config: &InstanceConfig,
+    services: &Services,
+    handle: &InstanceHandle,
+    internal: &mpsc::UnboundedSender<Internal>,
+) -> (Option<mpsc::Sender<VoicePacket>>, Vec<JoinHandle<()>>) {
+    if !config.speech.enabled {
+        return (None, Vec::new());
+    }
+    let Some(provider) = services.stt.read().get(config.speech.provider.as_deref()) else {
+        tracing::warn!("speech recognition is enabled but not available (see the configuration)");
+        return (None, Vec::new());
+    };
+    provider.prepare();
+    let (voice_tx, voice_rx) = mpsc::channel(VOICE_QUEUE);
+    let (heard_tx, mut heard_rx) = mpsc::unbounded_channel();
+    let settings = crate::speech::ListenerConfig {
+        language: config.speech.language.clone(),
+        prompt: config.speech.wake_word.clone(),
+    };
+    // Other bots (James' own instances) are not listened to: what they play or say could
+    // otherwise run voice commands in their name.
+    let resolve: crate::speech::Resolve = {
+        let (handle, bots) = (handle.clone(), services.bot_uids.clone());
+        Arc::new(move |id| {
+            let (handle, bots) = (handle.clone(), bots.clone());
+            Box::pin(async move {
+                let snapshot = handle.snapshot().await.ok()?;
+                let own = snapshot.own_client.clone()?;
+                let channel = snapshot.clients.iter().find(|c| c.id == own)?.channel.clone();
+                // Only people in the bot's channel (whose voice it hears).
+                snapshot.clients.into_iter().find(|c| {
+                    c.id == id && !c.is_self && c.channel == channel && !bots.read().contains(&c.uid)
+                })
+            })
+        })
+    };
+    let listener = spawn_here(crate::speech::listen(
+        provider, settings, resolve, voice_rx, heard_tx,
+    ));
+    let (handle, internal) = (handle.clone(), internal.clone());
+    let forwarder = spawn_here(async move {
+        while let Some(heard) = heard_rx.recv().await {
+            // Still the same person (client ids are reused), and not too late to act on.
+            let present = match handle.snapshot().await {
+                Ok(snapshot) => snapshot
+                    .clients
+                    .iter()
+                    .any(|c| c.id == heard.client.id && c.uid == heard.client.uid),
+                Err(_) => false,
+            };
+            if !present || heard.at.elapsed() > SPEECH_MAX_AGE {
+                continue;
+            }
+            let message = Internal::Heard {
+                client: Box::new(heard.client),
+                transcript: heard.transcript,
+            };
+            if internal.send(message).is_err() {
+                return;
+            }
+        }
+    });
+    (Some(voice_tx), vec![listener, forwarder])
+}
+
+/// Recognised speech older than this is not acted on.
+const SPEECH_MAX_AGE: Duration = Duration::from_secs(30);
+
+/// Voice packets waiting for recognition (about 5 s of one speaker); more are dropped.
+const VOICE_QUEUE: usize = 256;
 
 /// Spawns a task that logs into the current instance's log (see `spawn`).
 fn spawn_here<F>(future: F) -> JoinHandle<F::Output>
@@ -771,6 +934,8 @@ struct CommandJob {
     mode: MessageTarget,
     from: Client,
     text: String,
+    /// Spoken (speech recognition): needs the `voice.command` permission as well.
+    spoken: bool,
 }
 
 struct InstanceTask {
@@ -807,6 +972,10 @@ struct InstanceTask {
     next_speech: u64,
     /// Failures logged per kind and minute.
     failure_log: james_core::logs::RateLimiter,
+    /// Speech recognition of this instance, stopped with it (queued utterances are dropped).
+    speech_tasks: Vec<JoinHandle<()>>,
+    /// The channel was told that the bot listens.
+    announced: bool,
 }
 
 impl InstanceTask {
@@ -852,6 +1021,9 @@ impl InstanceTask {
             .is_err()
         {
             self.adapter_task.abort();
+        }
+        for task in &self.speech_tasks {
+            task.abort();
         }
         self.emit(InstanceEvent::Stopped);
         tracing::info!("instance stopped");
@@ -1038,7 +1210,11 @@ impl InstanceTask {
         let Some(factory) = self.services.platforms.get(&new.platform).cloned() else {
             return false;
         };
-        if new.platform != old.platform || factory.requires_reconnect(&old.settings, &new.settings) {
+        // Listening starts with the connection.
+        if new.platform != old.platform
+            || new.speech != old.speech
+            || factory.requires_reconnect(&old.settings, &new.settings)
+        {
             return false;
         }
         if new.audio.volume != old.audio.volume {
@@ -1209,6 +1385,7 @@ impl InstanceTask {
 
     fn handle_internal(&mut self, internal: Internal) {
         match internal {
+            Internal::Heard { client, transcript } => self.heard(*client, transcript),
             Internal::Synthesized { id, result } => {
                 // Cancelled meanwhile: the result (and its audio file) is dropped.
                 if self.synthesizing.remove(&id).is_none() {
@@ -1341,6 +1518,15 @@ impl InstanceTask {
             PlatformEvent::Connected { snapshot } => {
                 self.connected = true;
                 self.last_error = None;
+                let own = snapshot.own_client.as_ref();
+                if let Some(me) = snapshot.clients.iter().find(|c| Some(&c.id) == own) {
+                    self.services.bot_uids.write().insert(me.uid.clone());
+                }
+                // Once per start (not on every reconnect).
+                if self.config.speech.enabled && !self.speech_tasks.is_empty() && !self.announced {
+                    self.announced = true;
+                    self.announce_listening();
+                }
                 self.emit(InstanceEvent::Connected {
                     snapshot: Box::new(snapshot.clone()),
                 });
@@ -1376,6 +1562,7 @@ impl InstanceTask {
                         mode: *mode,
                         from: from.clone(),
                         text: text.clone(),
+                        spoken: false,
                     });
                 }
                 let sensitive = is_command || *mode == MessageTarget::Client;
@@ -1401,6 +1588,49 @@ impl InstanceTask {
         self.emit(InstanceEvent::Platform {
             event: Box::new(event),
         });
+    }
+
+    /// Tells the bot's channel that it listens (people are not asked otherwise).
+    fn announce_listening(&self) {
+        let handle = self.handle.clone();
+        spawn_here(async move {
+            let text = "Speech recognition is on: what is said in this channel is turned into text.";
+            if let Err(e) = handle.send_message(MessageTarget::Channel, None, text).await {
+                tracing::debug!(error = %e, "cannot announce speech recognition");
+            }
+        });
+    }
+
+    /// Something a client said: to plugins (and web clients that may read chat), and run as a
+    /// command if it starts with the wake word.
+    fn heard(&mut self, client: Client, transcript: james_core::stt::Transcript) {
+        tracing::debug!(chars = transcript.text.chars().count(), "speech recognised");
+        let command = self.config.speech.wake_word.as_deref().and_then(|wake| {
+            let spoken = crate::speech::spoken_command(&crate::speech::wake_command(&transcript.text, wake)?);
+            let name = spoken.split_whitespace().next()?;
+            // Anything else that sounds like the wake word is not answered.
+            self.services
+                .commands
+                .get_for(name, &self.config.id)
+                .filter(|c| c.spoken())?;
+            Some(spoken)
+        });
+        if let Some(command) = command {
+            self.queue_command(CommandJob {
+                mode: MessageTarget::Client,
+                from: client.clone(),
+                text: format!("{}{command}", self.config.command_prefix),
+                spoken: true,
+            });
+        }
+        self.emit_with(
+            InstanceEvent::SpeechRecognized {
+                client: Box::new(client),
+                text: transcript.text,
+                language: transcript.language,
+            },
+            true,
+        );
     }
 
     /// Runs chat commands of one client in order, with a per-client rate limit.
@@ -1466,6 +1696,11 @@ impl InstanceTask {
 async fn command_worker(handle: InstanceHandle, prefix: String, mut jobs: mpsc::Receiver<CommandJob>) {
     while let Ok(Some(job)) = tokio::time::timeout(COMMAND_WORKER_IDLE, jobs.recv()).await {
         let commands = handle.services().commands.clone();
+        // Anyone's microphone may pick up a command someone else said (or a clip played), so
+        // speaking commands is a permission of its own.
+        if job.spoken && !commands.allowed(&handle, &job.from, "voice.command").await {
+            continue;
+        }
         let reply = commands
             .dispatch(&prefix, &job.text, handle.clone(), job.from.clone(), job.mode)
             .await;

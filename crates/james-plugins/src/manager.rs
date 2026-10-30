@@ -1165,7 +1165,12 @@ impl PluginManager {
         data["sensitive"] = Value::Bool(envelope.sensitive);
         // Client IP addresses only reach plugins that may moderate (e.g. to match clients).
         let mut without_addresses: Option<Value> = None;
+        let speech = matches!(envelope.event, InstanceEvent::SpeechRecognized { .. });
         for plugin in plugins {
+            // What clients say only reaches plugins allowed to listen.
+            if speech && !self.granted(&plugin, "listen") {
+                continue;
+            }
             if let Some(peer) = self.peer(&plugin) {
                 let data = if self.granted(&plugin, "moderation") {
                     &data
