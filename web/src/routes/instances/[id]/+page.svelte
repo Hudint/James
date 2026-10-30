@@ -208,7 +208,7 @@
           >
             <div class="player-anchor" bind:this={playerCard}><Player {id} {status} /></div>
             {#if can('playback.play', id)}<AddMusic {id} />{/if}
-            <Queue {id} items={entry?.queue ?? []} />
+            <div class="queue-col"><Queue {id} items={entry?.queue ?? []} /></div>
             {#if can('playback.control', id)}<p class="hint shortcuts">{t('player.shortcuts')}</p>{/if}
           </div>
         {/if}
@@ -267,6 +267,21 @@
     .layout {
       grid-template-columns: minmax(0, 1fr) 340px;
       align-items: start;
+    }
+  }
+  /* Wide screens: the queue beside the player instead of below it. */
+  @media (min-width: 2000px) {
+    .layout {
+      grid-template-columns: minmax(0, 1fr) 380px;
+    }
+    .main {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+      align-items: start;
+    }
+    .queue-col {
+      grid-column: 2;
+      grid-row: 1 / span 3;
     }
   }
   /* Keyboard shortcuts mean nothing on touch screens and phones. */

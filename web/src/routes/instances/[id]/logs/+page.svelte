@@ -360,7 +360,7 @@
     list-style: none;
     margin: 0;
     padding: var(--space-2) 0;
-    max-height: min(65dvh, 720px);
+    max-height: max(320px, calc(100dvh - 280px));
     overflow-y: auto;
     font-family: var(--font-mono, ui-monospace, SFMono-Regular, Menlo, Consolas, monospace);
     font-size: var(--text-sm);

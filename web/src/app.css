@@ -317,9 +317,9 @@ kbd {
 /* Page structure ------------------------------------------------------------------- */
 .page {
   --page-pad: var(--space-6);
-  max-width: 1240px;
-  /* Left-aligned like the sidebar, so every page starts at the same edge. */
-  margin: 0;
+  max-width: 1320px;
+  /* Centred in the space next to the sidebar (wide and ultrawide screens). */
+  margin: 0 auto;
   /* The bottom leaves room for a bar fixed there (mini player on phones). */
   padding: var(--space-6) var(--page-pad) calc(var(--space-6) + var(--bottom-bar, 0px));
   /* Phones in landscape: keep clear of the notch. */
@@ -329,8 +329,20 @@ kbd {
   flex-direction: column;
   gap: var(--space-5);
 }
-.page.narrow {
-  max-width: 880px;
+/* Form pages: a narrower column on the same left edge as the other pages. */
+.page.narrow > * {
+  max-width: 960px;
+}
+@media (min-width: 1800px) {
+  .page {
+    max-width: 1560px;
+    --page-pad: 48px;
+  }
+}
+@media (min-width: 2400px) {
+  .page {
+    max-width: 1880px;
+  }
 }
 /* Pages arrive with a short rise, their first blocks one after another. */
 .page > * {

@@ -2,6 +2,8 @@
 const en = {
   app: { name: 'James', tagline: 'Music and voice bot', claim: 'Music, voice and plugins for your voice server, live on air.' },
   nav: {
+    built: 'built {time}',
+    commit: 'Commit',
     dashboard: 'Dashboard',
     instances: 'Instances',
     manage: 'Manage',

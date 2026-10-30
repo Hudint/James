@@ -6,6 +6,7 @@
   import { page } from '$app/state';
   import { onMount } from 'svelte';
   import { api } from '$lib/api';
+  import { announceBuild, build, builtAt, shortRevision } from '$lib/build';
   import ConfirmDialog from '$lib/components/ConfirmDialog.svelte';
   import Icon, { type IconName } from '$lib/components/Icon.svelte';
   import Toasts from '$lib/components/Toasts.svelte';
@@ -32,6 +33,7 @@
   }
 
   onMount(async () => {
+    announceBuild();
     applyTheme(ui.theme);
     setLocale(i18n.locale);
     const me = await loadSession();
@@ -245,6 +247,10 @@
         </a>
         <button class="icon-btn small" onclick={logout} aria-label={t('nav.logout')} title={t('nav.logout')}><Icon name="logout" size={18} /></button>
       </div>
+      <p class="build" title={build.revision ? `${t('nav.commit')} ${build.revision}` : undefined}>
+        <span>v{build.version}{#if shortRevision}{' · '}<span class="mono">{shortRevision}</span>{/if}</span>
+        <span>{t('nav.built', { time: builtAt(i18n.locale) })}</span>
+      </p>
     </nav>
     {#if menuOpen}
       <button class="scrim" aria-label={t('common.close')} onclick={() => (menuOpen = false)}></button>
@@ -504,6 +510,22 @@
     font-size: var(--text-xs);
     font-weight: 600;
     flex-shrink: 0;
+  }
+  .build {
+    display: flex;
+    flex-direction: column;
+    padding: var(--space-2) var(--space-2) 0;
+    font-size: 0.6875rem;
+    line-height: 1.4;
+    color: var(--side-muted);
+  }
+  .build > span {
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .build .mono {
+    font-size: inherit;
   }
   .topbar-offline {
     display: flex;

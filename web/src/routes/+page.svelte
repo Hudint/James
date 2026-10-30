@@ -383,6 +383,32 @@
       grid-template-columns: minmax(0, 1fr) 320px;
     }
   }
+  /* Wide screens: the desk becomes a grid of instance cards. */
+  @media (min-width: 1800px) {
+    .layout {
+      grid-template-columns: minmax(0, 1fr) 360px;
+    }
+    .desk {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(520px, 1fr));
+      gap: var(--space-4);
+      background: none;
+      border: none;
+      overflow: visible;
+    }
+    .strip {
+      border: 1px solid var(--border);
+      border-radius: var(--radius-lg);
+      background: var(--surface);
+      overflow: clip;
+    }
+    .strip:last-child {
+      border-bottom: 1px solid var(--border);
+    }
+    .quick {
+      max-width: none;
+    }
+  }
   .desk {
     list-style: none;
     margin: 0;

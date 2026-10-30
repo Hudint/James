@@ -19,7 +19,9 @@ WORKDIR /web
 COPY web/package.json web/package-lock.json ./
 RUN npm ci
 COPY web ./
-RUN npm run build
+# The commit shown in the web interface (the build context has no .git).
+ARG REVISION=""
+RUN JAMES_REVISION="$REVISION" npm run build
 
 # ---- Runtime ------------------------------------------------------------------------------
 FROM node:24-bookworm-slim

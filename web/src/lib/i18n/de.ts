@@ -4,6 +4,8 @@ import type { Messages } from './en';
 const de: Messages = {
   app: { name: 'James', tagline: 'Musik- und Sprachbot', claim: 'Musik, Sprache und Plugins für deinen Sprachserver – live auf Sendung.' },
   nav: {
+    built: 'gebaut {time}',
+    commit: 'Commit',
     dashboard: 'Übersicht',
     instances: 'Instanzen',
     manage: 'Verwaltung',

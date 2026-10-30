@@ -240,7 +240,7 @@
           <thead>
             <tr>
               <th scope="col"><span class="visually-hidden">{t('common.play')}</span></th>
-              <th scope="col">{t('library.columns.title')}</th>
+              <th scope="col" class="title-col">{t('library.columns.title')}</th>
               <th scope="col" class="hide-sm">{t('library.columns.artist')}</th>
               <th scope="col" class="hide-md">{t('library.columns.album')}</th>
               <th scope="col" class="num">{t('library.columns.duration')}</th>
@@ -361,6 +361,9 @@
 </dialog>
 
 <style>
+  .title-col {
+    width: 45%;
+  }
   .duration {
     font-size: var(--text-sm);
   }
